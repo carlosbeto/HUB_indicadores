@@ -1,10 +1,4 @@
 {
-  "paths": {
-    "snapshots_dir": "data/snapshots",
-    "logs_dir": "data/logs",
-    "tmp_dir": "data/tmp"
-  },
-
   "project_root": "X:\\Filial São José\\Remanufatura\\Gestão\\xApps\\HUB_indicadores",
 
   "sap_in_dir": "data/analiseEstoques/SAP_IN",

@@ -27,3 +27,13 @@ _legado/
 teste_colunas.py
 estrutura_hub.txt
 .env
+
+# Dados operacionais - Inventários
+code/analiseInventarios/data_db/
+code/analiseInventarios/MM_IN/
+code/analiseInventarios/MM_SNAPSHOT_IN/
+code/analiseInventarios/WEPV_IN/
+code/analiseInventarios/outputs/
+
+# Resíduos do Windows
+Thumbs.db

@@ -17,11 +17,17 @@ def render(cfg=None):
 
     st.caption(f"Link direto: {url}")
 
-    # (Opcional) mostrar se o DB do HUB existe (não impede abrir o app)
+    # Banco oficial utilizado pelo módulo de Inventários.
     try:
-        db_rel = Path("data/analiseInventarios/DB/inventarios.sqlite")
-        db_abs = (Path(__file__).resolve().parents[3] / db_rel).resolve()
-        st.caption(f"DB esperado no HUB: {db_abs}")
+        db_abs = (
+            Path(__file__).resolve().parents[3]
+            / "code"
+            / "analiseInventarios"
+            / "data_db"
+            / "inventarios.sqlite"
+        ).resolve()
+
+        st.caption(f"DB Inventários: {db_abs}")
         st.caption(f"Existe? {'SIM' if db_abs.exists() else 'NÃO'}")
     except Exception:
         pass

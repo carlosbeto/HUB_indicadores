@@ -48,9 +48,5 @@
       "out_wepv_dir": "data/analiseEstoques/OUTPUT/WEPV",
       "logs_dir": "data/analiseEstoques/LOGS"
     }
-  },
-
-  "inventarios": {
-    "db_path": "data/analiseInventarios/DB/inventarios.sqlite"
   }
 }

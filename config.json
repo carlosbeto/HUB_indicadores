@@ -13,6 +13,7 @@
   "mdg_sheets": ["Produto", "Peça"],
 
   "familia_file": "X:\\Filial São José\\Remanufatura\\Gestão\\Indicadores\\Base familia comercial_SAP V2.xlsx",
+  "familia_csv": "X:\\Filial São José\\Remanufatura\\Gestão\\Indicadores\\Base Familia Comercial\\Base_Familia_Comercial.csv",
   "familia_sheet": "Sheet1",
   "familia_col_material": "Cód. Material",
   "familia_col_grupo": "Unidade",

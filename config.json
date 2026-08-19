@@ -1,6 +1,4 @@
 {
-  "project_root": "X:\\Filial São José\\Remanufatura\\Gestão\\xApps\\HUB_indicadores",
-
   "sap_in_dir": "data/analiseEstoques/SAP_IN",
   "mb51_in_dir": "data/analiseEstoques/MB51_IN",
   "mb51_sheet_name": "Data",

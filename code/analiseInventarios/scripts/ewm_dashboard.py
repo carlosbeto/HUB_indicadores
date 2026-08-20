@@ -24,8 +24,14 @@ def _montar_historico_mensal_ewm(
     db_path: Path,
     ano_sel: int,
     semestre_sel: int,
+    data_referencia: date,
 ) -> pd.DataFrame:
-    """Monta o histórico mensal do WEPV usado por indicadores e tabela."""
+    """
+    Monta o histórico mensal do WEPV usado por indicadores e tabela.
+
+    A data de referência é recebida explicitamente para que a regra temporal
+    seja testável e não dependa de chamadas escondidas a date.today().
+    """
 
     ano_ref = int(ano_sel)
     meses_semestre = (
@@ -106,7 +112,12 @@ def _montar_historico_mensal_ewm(
         df_hist_ewm["Cobertura (%)"], errors="coerce"
     ).fillna(0)
 
-    df_hist_ewm = calcular_cobertura_semestral(df_hist_ewm)
+    # O núcleo central decide quais meses já são válidos no calendário
+    # e quais ainda são futuros.
+    df_hist_ewm = calcular_cobertura_semestral(
+        df_hist_ewm,
+        data_referencia=data_referencia,
+    )
 
     meta_mensal_ewm = 100 / 6
 
@@ -114,19 +125,7 @@ def _montar_historico_mensal_ewm(
         df_hist_ewm["Cobertura (%)"] - meta_mensal_ewm
     ).round(2)
 
-    df_hist_ewm["Mês índice"] = range(1, len(df_hist_ewm) + 1)
-
-    df_hist_ewm["Meta semestre (%)"] = (
-        df_hist_ewm["Mês índice"] * meta_mensal_ewm
-    ).round(2)
-
-    df_hist_ewm["Gap semestre (%)"] = (
-        df_hist_ewm["Cobertura semestre (%)"]
-        - df_hist_ewm["Meta semestre (%)"]
-    ).round(2)
-
     return df_hist_ewm
-
 
 def _render_indicadores_principais_ewm(
     *,
@@ -553,8 +552,12 @@ def render_ewm_dashboard(
     da lógica MM. Nesta etapa, a refatoração preserva o comportamento atual.
     """
 
-    st.subheader("Cobertura acumulada do inventário EWM")
+    # Uma única referência temporal é criada para toda a renderização.
+    # Isso mantém todos os indicadores da página usando o mesmo "hoje"
+    # e permite testes futuros com datas controladas.
+    data_referencia = date.today()
 
+    st.subheader("Cobertura acumulada do inventário EWM")
 
     if df_ewm.empty:
         st.warning("Arquivo de cobertura EWM não encontrado ou vazio.")
@@ -598,7 +601,8 @@ def render_ewm_dashboard(
         db_path=db_path,
         ano_sel=ano_sel,
         semestre_sel=semestre_sel,
-    )
+        data_referencia=data_referencia,
+)
 
     _render_indicadores_principais_ewm(
         df_hist_ewm=df_hist_ewm,

@@ -352,14 +352,22 @@ def semanas_calendario_do_mes(ano: int, mes: int) -> list[tuple[int, int]]:
 
     return sorted(semanas)
 
+    # A data de referência é recebida explicitamente para que a regra temporal
+    # seja testável e não dependa de chamadas escondidas a date.today().
 def _preparar_historico_mm(
     *,
     db_path: Path,
     deposito_sel: str,
     ano_sel: int,
     semestre_sel: int,
+    data_referencia: date,
 ) -> pd.DataFrame:
-    """Monta e prepara o histórico mensal utilizado por indicadores e tabela."""
+    """
+    Monta e prepara o histórico mensal utilizado por indicadores e tabela.
+
+    A data de referência é recebida explicitamente para que a regra temporal
+    seja testável e não dependa de chamadas escondidas a date.today().
+    """
 
     df_hist_mm = montar_historico_mensal_mm(
         db_path=db_path,
@@ -383,7 +391,12 @@ def _preparar_historico_mm(
         df_hist_mm["Cobertura (%)"], errors="coerce"
     ).fillna(0)
 
-    df_hist_mm = calcular_cobertura_semestral(df_hist_mm)
+    # O núcleo central decide quais meses já são válidos no calendário
+    # e quais ainda são futuros.
+    df_hist_mm = calcular_cobertura_semestral(
+        df_hist_mm,
+        data_referencia=data_referencia,
+    )
 
     meta_mensal_mm = 100.0 / 6.0
 
@@ -732,6 +745,11 @@ def render_mm_dashboard(
 ) -> None:
     """Renderiza a aba Contagens da semana para os depósitos MM."""
 
+    # Uma única referência temporal é criada para toda a renderização.
+    # Isso evita que diferentes partes do painel obtenham "hoje"
+    # separadamente e facilita testes com datas controladas.
+    data_referencia = date.today()
+
     with st.expander("Como interpretar este painel"):
         st.markdown(
             """
@@ -818,7 +836,8 @@ def render_mm_dashboard(
             deposito_sel=deposito_sel,
             ano_sel=int(ano_sel),
             semestre_sel=int(semestre_sel),
-        )
+            data_referencia=data_referencia,
+)
 
         _render_indicadores_principais_mm(
             df_hist_mm=df_hist_mm_topo,
@@ -1741,4 +1760,3 @@ def render_mm_dashboard(
 
     except Exception as e:
         st.error(f"Erro ao montar a aba de contagens da semana: {e}")
-

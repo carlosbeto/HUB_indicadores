@@ -2,5 +2,9 @@
   "python.defaultInterpreterPath": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
   "python.analysis.extraPaths": [
     "${workspaceFolder}\\code"
-  ]
+  ],
+  "python.terminal.activateEnvironment": true,
+  "terminal.integrated.env.windows": {
+    "PYTHONPATH": "${workspaceFolder}\\code"
+  }
 }

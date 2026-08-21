@@ -5,6 +5,7 @@
 # Cache Python
 __pycache__/
 *.pyc
+.pytest_cache/
 
 # Dados operacionais
 data/

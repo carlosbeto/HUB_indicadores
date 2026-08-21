@@ -3,13 +3,20 @@
 
 from __future__ import annotations
 
-import re
 import sqlite3
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 import pandas as pd
+
+from analiseInventarios.scripts.materiais_snapshot import (
+    SAP_IN_DIR,
+    choose_first_file_per_month,
+    get_snapshot_info_from_filename,
+    list_material_files,
+    read_material_excel,
+    to_float_ptbr,
+)
 
 
 # ------------------------------------------------------------
@@ -18,142 +25,24 @@ import pandas as pd
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DB_PATH = PROJECT_ROOT / "data_db" / "inventarios.sqlite"
 
-# Fonte do baseline: arquivo de estoque do projeto analiseEstoques
-BASELINE_DIR = Path(
-    r"X:\Filial São José\Remanufatura\Gestão\xApps\HUB_indicadores\data\analiseEstoques\SAP_IN"
-)
-
+# A fonte do baseline é o mesmo SAP_IN diário utilizado pelo HUB.
+# O caminho é resolvido dinamicamente para DEV ou PROD.
+BASELINE_DIR = SAP_IN_DIR
 
 # ------------------------------------------------------------
-# COLUNAS ESPERADAS NO EXCEL DE ESTOQUE
+# CONSULTAS AO BANCO
 # ------------------------------------------------------------
-REQUIRED_COLUMNS = {
-    "Material",
-    "Descrição de material",
-    "Depósito",
-    "Estoque de utilização livre",
-    "Estoque em controle de qualidade",
-    "Estoque bloqueado",
-    "Valor do estoque de utilização livre",
-    "Valor do estoque no controle de qualidade",
-    "Valor do estoque bloqueado",
-}
 
-
-# ------------------------------------------------------------
-# UTILITÁRIOS
-# ------------------------------------------------------------
-def to_float_ptbr(x) -> Optional[float]:
-    """
-    Converte valores no padrão pt-BR para float.
-
-    Exemplos:
-    - '1.234,56' -> 1234.56
-    - '8 PEÇ'    -> 8.0
-    - '20,33 BRL' -> 20.33
-    - vazio / NaN -> None
-    """
-    if x is None or (isinstance(x, float) and pd.isna(x)):
-        return None
-
-    s = str(x).strip()
-    if not s or s.lower() == "nan":
-        return None
-
-    # Remove textos de unidade/moeda mais comuns
-    s = s.replace("PEÇ", "").replace("BRL", "").strip()
-
-    # Normaliza pt-BR:
-    # 1.234,56 -> 1234.56
-    if "," in s:
-        s = s.replace(".", "").replace(",", ".")
-
-    try:
-        return float(s)
-    except Exception:
-        return None
-
-
-def get_snapshot_info_from_filename(file_path: Path) -> tuple[str, str]:
-    """
-    Extrai snapshot_date e snapshot_month a partir do nome do arquivo.
-
-    Suporta dois formatos observados:
-    1) MateriaisMMYYYY.xlsx
-       Ex.: Materiais012026.xlsx -> snapshot_date=2026-01-01 | snapshot_month=2026-01
-
-    2) MateriaisDDMMYYYY.xlsx
-       Ex.: Materiais03032026.xlsx -> snapshot_date=2026-03-03 | snapshot_month=2026-03
-    """
-    nome = file_path.stem.replace("Materiais", "").strip()
-
-    # Formato MMYYYY
-    if len(nome) == 6 and nome.isdigit():
-        mes = int(nome[0:2])
-        ano = int(nome[2:6])
-        snapshot_date = f"{ano:04d}-{mes:02d}-01"
-        snapshot_month = f"{ano:04d}-{mes:02d}"
-        return snapshot_date, snapshot_month
-
-    # Formato DDMMYYYY
-    if len(nome) == 8 and nome.isdigit():
-        dia = int(nome[0:2])
-        mes = int(nome[2:4])
-        ano = int(nome[4:8])
-        snapshot_date = f"{ano:04d}-{mes:02d}-{dia:02d}"
-        snapshot_month = f"{ano:04d}-{mes:02d}"
-        return snapshot_date, snapshot_month
-
-    raise ValueError(
-        f"Nome de arquivo não reconhecido para extrair snapshot: {file_path.name}"
-    )
-
-
-def list_baseline_files() -> list[Path]:
-    """
-    Lista os arquivos Materiais*.xlsx disponíveis na pasta de baseline.
-    """
-    if not BASELINE_DIR.exists():
-        raise FileNotFoundError(f"Pasta de baseline não encontrada: {BASELINE_DIR}")
-
-    files = sorted(
-        [p for p in BASELINE_DIR.glob("Materiais*.xlsx") if p.is_file() and not p.name.startswith("~$")]
-    )
-
-    if not files:
-        raise FileNotFoundError(f"Nenhum arquivo Materiais*.xlsx encontrado em {BASELINE_DIR}")
-
-    return files
-
-
-def choose_first_file_per_month(files: list[Path]) -> dict[str, Path]:
-    """
-    A partir da lista de arquivos, escolhe o primeiro arquivo de cada mês.
-
-    Regras:
-    - a competência do mês vem do nome do arquivo
-    - se houver mais de um arquivo no mesmo mês,
-      usamos o menor snapshot_date daquele mês
-    """
-    month_to_file: dict[str, tuple[str, Path]] = {}
-
-    for file_path in files:
-        snapshot_date, snapshot_month = get_snapshot_info_from_filename(file_path)
-
-        if snapshot_month not in month_to_file:
-            month_to_file[snapshot_month] = (snapshot_date, file_path)
-        else:
-            current_date, _ = month_to_file[snapshot_month]
-            if snapshot_date < current_date:
-                month_to_file[snapshot_month] = (snapshot_date, file_path)
-
-    return {month: file_path for month, (_, file_path) in month_to_file.items()}
-
-
-def get_existing_snapshot_months(conn: sqlite3.Connection) -> set[str]:
+def get_existing_snapshot_months(
+    conn: sqlite3.Connection,
+) -> set[str]:
     """
     Retorna os meses já carregados na tabela baseline_items.
+
+    Essa verificação evita carregar novamente um mês que já possui
+    baseline registrado no banco.
     """
+
     rows = conn.execute(
         """
         SELECT DISTINCT snapshot_month
@@ -162,26 +51,15 @@ def get_existing_snapshot_months(conn: sqlite3.Connection) -> set[str]:
         """
     ).fetchall()
 
-    return {str(r[0]) for r in rows if r[0] is not None}
+    return {
+        str(row[0])
+        for row in rows
+        if row[0] is not None
+    }
 
-
-def validate_columns(df: pd.DataFrame, file_name: str) -> None:
-    missing = [col for col in REQUIRED_COLUMNS if col not in df.columns]
-    if missing:
-        raise ValueError(
-            f"{file_name}: faltam colunas esperadas: {missing}\n"
-            f"Colunas encontradas: {list(df.columns)}"
-        )
-
-
-def read_baseline_excel(file_path: Path) -> pd.DataFrame:
-    """
-    Lê o Excel do baseline e valida as colunas mínimas.
-    """
-    df = pd.read_excel(file_path)
-    validate_columns(df, file_path.name)
-    return df
-
+# ------------------------------------------------------------
+# TRANSFORMAÇÃO DO BASELINE
+# ------------------------------------------------------------
 
 def transform_baseline_df(df: pd.DataFrame, file_path: Path) -> pd.DataFrame:
     """
@@ -276,7 +154,7 @@ def load_month_if_missing(conn: sqlite3.Connection, file_path: Path) -> tuple[st
     - snapshot_month carregado
     - quantidade de linhas inseridas
     """
-    df_raw = read_baseline_excel(file_path)
+    df_raw = read_material_excel(file_path)
     df = transform_baseline_df(df_raw, file_path)
 
     snapshot_month = str(df["snapshot_month"].iloc[0])
@@ -290,9 +168,8 @@ def load_month_if_missing(conn: sqlite3.Connection, file_path: Path) -> tuple[st
 
     return snapshot_month, len(df)
 
-
 def main() -> None:
-    files = list_baseline_files()
+    files = list_material_files()
     first_files_by_month = choose_first_file_per_month(files)
 
     with sqlite3.connect(DB_PATH) as conn:

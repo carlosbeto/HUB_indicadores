@@ -400,6 +400,14 @@ def _preparar_historico_mm(
 
     meta_mensal_mm = 100.0 / 6.0
 
+    # Indicadores mensais também representam somente períodos já ocorridos.
+    # Um mês futuro pode permanecer na tabela como referência de calendário,
+    # mas ainda não possui cobertura nem GAP realizados.
+    df_hist_mm.loc[
+        ~df_hist_mm["Período válido"],
+        "Cobertura (%)",
+    ] = pd.NA
+
     df_hist_mm["Gap mês (%)"] = (
         df_hist_mm["Cobertura (%)"] - meta_mensal_mm
     ).round(2)
@@ -421,15 +429,15 @@ def _render_indicadores_principais_mm(
     with st.container(border=True):
         st.markdown(f"**Indicadores principais — {deposito_sel}**")
 
+        # O mês de referência é definido pelo calendário, não pela existência
+        # de contagens. Assim, um mês já iniciado continua sendo considerado
+        # mesmo quando ainda possui zero itens contados.
         df_validos = df_hist_mm[
-            pd.to_numeric(
-                df_hist_mm["Contados"],
-                errors="coerce",
-            ).fillna(0) > 0
+            df_hist_mm["Período válido"]
         ].copy()
 
         if df_validos.empty:
-            st.info("Não há meses com contagem para calcular os indicadores.")
+            st.info("Não há períodos válidos para calcular os indicadores.")
             return
 
         row_atual = df_validos.iloc[-1]
@@ -470,18 +478,18 @@ def _render_indicadores_principais_mm(
             else 0.0
         )
 
-        baseline_medio = float(
-            pd.to_numeric(
-                df_validos["Baseline"],
-                errors="coerce",
-            ).fillna(0).mean()
+        # Estes indicadores já são calculados pelo núcleo central.
+        # O dashboard apenas consome o resultado da regra de negócio.
+        baseline_medio = (
+            float(row_atual["Baseline médio"])
+            if pd.notna(row_atual["Baseline médio"])
+            else 0.0
         )
 
-        contados_acumulados = float(
-            pd.to_numeric(
-                df_validos["Contados"],
-                errors="coerce",
-            ).fillna(0).sum()
+        contados_acumulados = (
+            float(row_atual["Contados acumulado"])
+            if pd.notna(row_atual["Contados acumulado"])
+            else 0.0
         )
 
         range_max_mes = max(
@@ -606,8 +614,8 @@ def _render_indicadores_principais_mm(
             f"Mês de referência: {mes_referencia}. "
             f"A cobertura mensal compara os itens contados no mês com o baseline "
             f"do mesmo mês e utiliza meta mensal de {fmt_pct(meta_mensal)}. "
-            f"A evolução semestral utiliza a soma dos itens contados dividida "
-            f"pela média dos baselines dos meses com contagem e é comparada "
+            f"A evolução semestral utiliza os contados acumulados divididos "
+            f"pelo baseline médio progressivo dos meses válidos e é comparada "
             f"com a meta acumulada de {fmt_pct(meta_semestre)}."
         )
 
@@ -638,13 +646,27 @@ def _render_tabela_evolucao_mm(
                 "Meta semestre (%)",
                 "Cobertura semestre (%)",
                 "Gap semestre (%)",
+                "Falta contar para meta (itens)",
             ]
         ].copy()
 
+        # O nome técnico da coluna é mantido no núcleo de indicadores,
+        # mas na tabela usamos um rótulo mais curto para melhorar a leitura.
+        df_hist_view = df_hist_view.rename(
+            columns={
+                "Falta contar para meta (itens)": "Falta contar p/ meta",
+            }
+        )
+
         def status_com_icone(valor):
+            # Valores ausentes representam períodos sem leitura realizada,
+            # como meses futuros. Eles não devem ser classificados como atraso.
+            if pd.isna(valor):
+                return "⚪ Sem leitura"
+
             try:
                 valor = float(valor)
-            except Exception:
+            except (TypeError, ValueError):
                 return "⚪ Sem leitura"
 
             if valor >= 0:
@@ -661,9 +683,13 @@ def _render_tabela_evolucao_mm(
         ].apply(status_com_icone)
 
         def cor_gap(valor):
+            # Sem leitura não recebe cor de desempenho.
+            if pd.isna(valor):
+                return ""
+
             try:
                 valor = float(valor)
-            except Exception:
+            except (TypeError, ValueError):
                 return ""
 
             if valor >= 0:
@@ -692,6 +718,7 @@ def _render_tabela_evolucao_mm(
                     "Meta semestre (%)": lambda x: fmt_pct(x),
                     "Cobertura semestre (%)": lambda x: fmt_pct(x),
                     "Gap semestre (%)": lambda x: fmt_pct(x),
+                    "Falta contar p/ meta": lambda x: fmt_int(x),
                 }
             )
             .map(cor_gap, subset=["Gap mês (%)", "Gap semestre (%)"])
@@ -704,33 +731,12 @@ def _render_tabela_evolucao_mm(
             hide_index=True,
         )
 
-        df_validos = df_hist_mm[
-            df_hist_mm["Contados"] > 0
-        ].copy()
-
-        if not df_validos.empty:
-            baseline_medio = df_validos["Baseline"].mean()
-            contados_medio = df_validos["Contados"].mean()
-            cobertura_media = df_validos["Cobertura (%)"].mean()
-            gap_medio = cobertura_media - (100.0 / 6.0)
-
-            with st.container(border=True):
-                st.markdown("**Resumo do período (médias)**")
-
-                r1, r2, r3, r4 = st.columns(4)
-
-                r1.metric("Baseline médio", fmt_int(baseline_medio))
-                r2.metric("Contados médio", fmt_int(contados_medio))
-                r3.metric("Cobertura média", fmt_pct(cobertura_media))
-                r4.metric("GAP médio", fmt_pct(gap_medio))
-
         st.caption(
             "GAP mês compara a cobertura isolada do mês com a meta mensal "
             "de 16,67%. GAP semestre compara a evolução acumulada, calculada "
             "pela soma dos itens contados dividida pela média dos baselines, "
             "com a meta acumulada."
         )
-
 
 def render_mm_dashboard(
     *,
@@ -771,33 +777,40 @@ def render_mm_dashboard(
             Mostra como o volume de contagens ficou distribuído entre os colaboradores.  
             Ajuda a identificar concentração, equilíbrio da carga e liderança operacional.
 
-            **Cobertura do ciclo semestral**  
+            **Cobertura do inventário**
             O painel apresenta duas leituras complementares:
 
-            - **Cobertura oficial do semestre (velocímetro da esquerda)**  
-              Representa a cobertura baseada no baseline oficial do mês de referência.  
-              É a leitura formal do semestre e compara o resultado com a meta acumulada.
+            - **Cobertura do mês (velocímetro da esquerda)**
+              Mostra o desempenho isolado do mês de referência.
+              Compara os itens contados no mês com o baseline do próprio mês
+              e com a meta mensal de 16,67%.
 
-            - **Cobertura consolidada do período (velocímetro da direita)**  
-              Representa a cobertura real do período já percorrido no semestre.  
-              O cálculo considera:
+            - **Evolução do semestre (velocímetro da direita)**
+              Mostra o desempenho acumulado do semestre até o mês de referência.
+              O cálculo utiliza:
 
-              **soma dos itens contados ÷ soma dos baselines dos meses com contagem**
+              **contados acumulados ÷ baseline médio progressivo**
 
-              Essa leitura é a principal visão operacional do painel, pois mostra o desempenho acumulado real do período.
+              Todos os meses já ocorridos no semestre participam do cálculo,
+              inclusive um mês válido que ainda tenha zero contagens.
+              Meses futuros permanecem apenas como referência de calendário
+              e não participam dos indicadores realizados.
 
-            **Composição da cobertura consolidada**  
-            - Meses com contagem → quantos meses do semestre tiveram inventário
-            - Soma dos baselines → total de itens esperados nos meses considerados
-            - Cobertura consolidada do período → percentual efetivo contado sobre o total esperado
+            **Composição da evolução semestral**
+            - Meses válidos → meses já ocorridos no semestre
+            - Baseline médio → média progressiva dos baselines dos meses válidos
+            - Contados acumulados → soma das contagens dos meses válidos
+            - Cobertura do semestre → contados acumulados divididos pelo baseline médio
+            - Meta do semestre → cresce em sextos ao longo do ciclo, até 100%
+            - GAP do semestre → diferença entre a cobertura realizada e a meta acumulada
 
             **Leitura prática**  
             - Mais linhas contadas → maior volume de execução  
             - Mais SKUs distintos → maior cobertura de itens diferentes  
             - Poucos operadores com muito volume → concentração do esforço  
             - Oscilações fortes entre semanas → variação operacional do processo  
-            - Cobertura consolidada próxima ou acima da meta → operação em linha com o esperado  
-            - Cobertura consolidada abaixo da meta → atraso no ciclo de inventário
+            - Cobertura semestral próxima ou acima da meta → operação em linha com o esperado
+            - Cobertura semestral abaixo da meta → atenção ao ritmo do ciclo de inventário
             """
         )
 

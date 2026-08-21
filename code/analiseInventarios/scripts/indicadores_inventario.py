@@ -9,11 +9,9 @@ evitando fórmulas duplicadas em diferentes telas.
 """
 
 from __future__ import annotations
-
 from datetime import date
-
 import pandas as pd
-
+import math
 
 def calcular_cobertura_semestral(
     df: pd.DataFrame,
@@ -179,4 +177,55 @@ def calcular_cobertura_semestral(
         - resultado["Meta semestre (%)"]
     ).round(2)
 
+    # Converte a meta percentual acumulada em quantidade inteira de itens.
+    # Usamos arredondamento para cima porque não existe fração de SKU:
+    # se a meta exigir 415,2 itens, na prática são necessários 416.
+    resultado["Meta semestre (itens)"] = pd.Series(
+        pd.NA,
+        index=resultado.index,
+        dtype="Int64",
+    )
+
+    mask_meta_itens = (
+        resultado["Período válido"]
+        & resultado["Baseline médio"].notna()
+        & resultado["Meta semestre (%)"].notna()
+    )
+
+    resultado.loc[
+        mask_meta_itens,
+        "Meta semestre (itens)",
+    ] = (
+        resultado.loc[mask_meta_itens].apply(
+            lambda linha: math.ceil(
+                float(linha["Baseline médio"])
+                * float(linha["Meta semestre (%)"])
+                / 100.0
+            ),
+            axis=1,
+        )
+    )
+
+    # Mostra quantos itens adicionais ainda precisam ser contados
+    # para atingir a meta acumulada daquele mês.
+    # Se a meta já foi atingida, o saldo exibido é zero.
+    resultado["Falta contar para meta (itens)"] = pd.Series(
+        pd.NA,
+        index=resultado.index,
+        dtype="Int64",
+    )
+
+    resultado.loc[
+        mask_meta_itens,
+        "Falta contar para meta (itens)",
+    ] = (
+        resultado.loc[
+            mask_meta_itens,
+            "Meta semestre (itens)",
+        ].astype("Int64")
+        - resultado.loc[
+            mask_meta_itens,
+            "Contados acumulado",
+        ].round().astype("Int64")
+    ).clip(lower=0)
     return resultado

@@ -121,6 +121,14 @@ def _montar_historico_mensal_ewm(
 
     meta_mensal_ewm = 100 / 6
 
+    # Meses futuros não possuem cobertura mensal realizada.
+    # Mantemos suas linhas no calendário, mas sem criar artificialmente
+    # uma leitura de atraso antes de o mês começar.
+    df_hist_ewm.loc[
+        ~df_hist_ewm["Período válido"],
+        "Cobertura (%)",
+    ] = pd.NA
+
     df_hist_ewm["Gap mês (%)"] = (
         df_hist_ewm["Cobertura (%)"] - meta_mensal_ewm
     ).round(2)
@@ -140,15 +148,15 @@ def _render_indicadores_principais_ewm(
     with st.container(border=True):
         st.markdown("**Indicadores principais — WEPV**")
 
+        # O mês de referência é definido pelo calendário, não pela existência
+        # de contagens. Um mês válido com zero contagens continua participando
+        # normalmente dos indicadores.
         df_validos = df_hist_ewm[
-            pd.to_numeric(
-                df_hist_ewm["Contados"],
-                errors="coerce",
-            ).fillna(0) > 0
+            df_hist_ewm["Período válido"]
         ].copy()
 
         if df_validos.empty:
-            st.info("Não há meses com contagem para calcular os indicadores.")
+            st.info("Não há períodos válidos para calcular os indicadores.")
             return
 
         row_atual = df_validos.iloc[-1]
@@ -170,18 +178,18 @@ def _render_indicadores_principais_ewm(
         baseline_mes_ewm = float(row_atual["Baseline"])
         contados_mes_ewm = float(row_atual["Contados"])
 
-        baseline_medio_ewm = float(
-            pd.to_numeric(
-                df_validos["Baseline"],
-                errors="coerce",
-            ).fillna(0).mean()
+        # Valores acumulados e baseline médio vêm do núcleo central.
+        # Não reproduzimos a fórmula na camada de apresentação.
+        baseline_medio_ewm = (
+            float(row_atual["Baseline médio"])
+            if pd.notna(row_atual["Baseline médio"])
+            else 0.0
         )
 
-        contados_acumulados_ewm = float(
-            pd.to_numeric(
-                df_validos["Contados"],
-                errors="coerce",
-            ).fillna(0).sum()
+        contados_acumulados_ewm = (
+            float(row_atual["Contados acumulado"])
+            if pd.notna(row_atual["Contados acumulado"])
+            else 0.0
         )
 
         range_max_mes = max(
@@ -327,8 +335,8 @@ def _render_indicadores_principais_ewm(
             f"A cobertura mensal compara os itens contados no mês com o "
             f"baseline do mesmo mês e utiliza meta mensal de "
             f"{fmt_pct(meta_mensal_ewm)}. A evolução semestral utiliza "
-            f"a soma dos itens contados dividida pela média dos baselines "
-            f"dos meses com contagem e é comparada com a meta acumulada de "
+            f"os contados acumulados divididos pelo baseline médio progressivo "
+            f"dos meses válidos e é comparada com a meta acumulada de "
             f"{fmt_pct(meta_semestre_ewm)}."
         )
 
@@ -362,13 +370,27 @@ def _render_evolucao_mensal_ewm(
                 "Meta semestre (%)",
                 "Cobertura semestre (%)",
                 "Gap semestre (%)",
+                "Falta contar para meta (itens)",
             ]
         ].copy()
 
+        # O nome técnico permanece no núcleo de indicadores.
+        # Na tabela usamos um rótulo mais curto para facilitar a leitura.
+        df_hist_ewm_view = df_hist_ewm_view.rename(
+            columns={
+                "Falta contar para meta (itens)": "Falta contar p/ meta",
+            }
+        )
+
         def status_com_icone(valor):
+            # Valores ausentes representam períodos sem leitura realizada,
+            # como meses futuros. Eles não devem ser classificados como atraso.
+            if pd.isna(valor):
+                return "⚪ Sem leitura"
+
             try:
                 valor = float(valor)
-            except Exception:
+            except (TypeError, ValueError):
                 return "⚪ Sem leitura"
 
             if valor >= 0:
@@ -385,9 +407,13 @@ def _render_evolucao_mensal_ewm(
         )
 
         def cor_gap(valor):
+            # Sem leitura não recebe cor de desempenho.
+            if pd.isna(valor):
+                return ""
+
             try:
                 valor = float(valor)
-            except Exception:
+            except (TypeError, ValueError):
                 return ""
 
             if valor >= 0:
@@ -416,6 +442,7 @@ def _render_evolucao_mensal_ewm(
                     "Meta semestre (%)": lambda x: fmt_pct(x),
                     "Cobertura semestre (%)": lambda x: fmt_pct(x),
                     "Gap semestre (%)": lambda x: fmt_pct(x),
+                    "Falta contar p/ meta": lambda x: fmt_int(x),
                 }
             )
             .map(cor_gap, subset=["Gap mês (%)", "Gap semestre (%)"])
@@ -431,27 +458,11 @@ def _render_evolucao_mensal_ewm(
             hide_index=True,
         )
 
-        df_validos = df_hist_ewm[
-            df_hist_ewm["Contados"] > 0
-        ].copy()
-
-        if not df_validos.empty:
-            baseline_medio = df_validos["Baseline"].mean()
-            contados_medio = df_validos["Contados"].mean()
-            cobertura_media = df_validos["Cobertura (%)"].mean()
-            gap_medio = cobertura_media - (100 / 6)
-
-            with st.container(border=True):
-                st.markdown("**Resumo executivo do período (médias)**")
-
-                r1, r2, r3, r4 = st.columns(4)
-                r1.metric("Baseline médio", fmt_int(baseline_medio))
-                r2.metric("Contados médio", fmt_int(contados_medio))
-                r3.metric("Cobertura média", fmt_pct(cobertura_media))
-                r4.metric("GAP médio", fmt_pct(gap_medio))
-
-        df_leitura = df_hist_ewm_view[
-            df_hist_ewm_view["Contados"].fillna(0) > 0
+        # A leitura executiva utiliza o último mês já ocorrido.
+        # A máscara vem do histórico original, que é a fonte da regra temporal,
+        # e os índices são preservados em df_hist_ewm_view.
+        df_leitura = df_hist_ewm_view.loc[
+            df_hist_ewm["Período válido"]
         ].copy()
 
         if not df_leitura.empty:

@@ -38,10 +38,11 @@ def main() -> None:
     scripts_dir = Path(__file__).resolve().parent
 
     steps = [
-        ("[1/4] Carregando contagens MM/EWM (counts)...", scripts_dir / "01_load_excels.py"),
-        ("[2/4] Carregando snapshot MM (mm_snapshot)...", scripts_dir / "02_load_mm_snapshot.py"),
-        ("[3/4] Carregando baseline mensal (baseline_items)...", scripts_dir / "load_baseline_snapshot.py"),
-        ("[4/4] Gerando KPIs / outputs...", scripts_dir / "03_build_kpis.py"),
+        ("[1/5] Garantindo schema do banco...", scripts_dir / "00_init_db.py"),
+        ("[2/5] Carregando contagens MM/EWM (counts)...", scripts_dir / "01_load_excels.py"),
+        ("[3/5] Carregando snapshot MM (mm_snapshot)...", scripts_dir / "02_load_mm_snapshot.py"),
+        ("[4/5] Carregando baseline mensal (baseline_items)...", scripts_dir / "load_baseline_snapshot.py"),
+        ("[5/5] Gerando KPIs / outputs...", scripts_dir / "03_build_kpis.py"),
     ]
 
     print("=" * 70)

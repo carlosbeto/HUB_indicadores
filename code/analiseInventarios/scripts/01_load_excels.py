@@ -13,7 +13,7 @@ import pandas as pd
 # ====== Caminhos do projeto atual (HUB) ======
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 MM_DIR = PROJECT_ROOT / "MM_IN"
-EWM_DIR = PROJECT_ROOT / "WEPV_IN"
+EWM_DIR = PROJECT_ROOT / "EWM_IN"
 DB_PATH = PROJECT_ROOT / "data_db" / "inventarios.sqlite"
 SHEET_NAME = "Data"
 # =============================================
@@ -248,7 +248,7 @@ def main() -> None:
     ewm_files = iter_xlsx(EWM_DIR)
 
     if not mm_files and not ewm_files:
-        print("[WARN] Nenhum .xlsx encontrado em MM_IN ou WEPV_IN.")
+        print("[WARN] Nenhum .xlsx encontrado em MM_IN ou EWM_IN.")
         return
 
     loaded_at = datetime.now().isoformat(timespec="seconds")

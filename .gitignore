@@ -33,7 +33,7 @@ estrutura_hub.txt
 code/analiseInventarios/data_db/
 code/analiseInventarios/MM_IN/
 code/analiseInventarios/MM_SNAPSHOT_IN/
-code/analiseInventarios/WEPV_IN/
+code/analiseInventarios/EWM_IN/
 code/analiseInventarios/outputs/
 
 # Resíduos do Windows

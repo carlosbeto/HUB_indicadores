@@ -26,20 +26,21 @@ def q_df(conn: sqlite3.Connection, sql: str, params: dict | None = None) -> pd.D
 # ------------------------------------------------------------
 # EWM - BASELINE REAL DO CICLO
 # ------------------------------------------------------------
-def get_latest_ewm_baseline(conn: sqlite3.Connection) -> tuple[str | None, int | None]:
+def get_latest_ewm_baseline(
+    conn: sqlite3.Connection,
+    logical_warehouse: str,
+) -> tuple[str | None, int | None]:
     """
-    Busca o último baseline disponível do WEPV na tabela baseline_items.
+    Busca o último baseline disponível do depósito lógico EWM informado.
+    """
 
-    Retorna:
-    - snapshot_month_ewm: ex. '2026-03'
-    - skus_baseline_ewm: quantidade distinta de materiais do baseline
-    """
     row_month = conn.execute(
         """
         SELECT MAX(snapshot_month)
         FROM baseline_items
-        WHERE warehouse_code = 'WEPV'
-        """
+        WHERE warehouse_code = ?
+        """,
+        (logical_warehouse,),
     ).fetchone()
 
     if row_month is None or row_month[0] is None:
@@ -52,9 +53,12 @@ def get_latest_ewm_baseline(conn: sqlite3.Connection) -> tuple[str | None, int |
         SELECT COUNT(DISTINCT material) AS skus_baseline
         FROM baseline_items
         WHERE snapshot_month = ?
-          AND warehouse_code = 'WEPV'
+          AND warehouse_code = ?
         """,
-        (snapshot_month_ewm,),
+        (
+            snapshot_month_ewm,
+            logical_warehouse,
+        ),
     ).fetchone()
 
     if row_baseline is None or row_baseline[0] is None:
@@ -63,7 +67,10 @@ def get_latest_ewm_baseline(conn: sqlite3.Connection) -> tuple[str | None, int |
     return snapshot_month_ewm, int(row_baseline[0])
 
 
-def build_ewm_cobertura(conn: sqlite3.Connection) -> pd.DataFrame:
+def build_ewm_cobertura(
+    conn: sqlite3.Connection,
+    logical_warehouse: str,
+) -> pd.DataFrame:
     """
     Constrói a cobertura acumulada do EWM por semana.
 
@@ -72,11 +79,14 @@ def build_ewm_cobertura(conn: sqlite3.Connection) -> pd.DataFrame:
     - agora, o baseline vem da tabela baseline_items
     - isso deixa o CSV coerente com os KPIs do Streamlit
     """
-    snapshot_month_ewm, skus_baseline_ewm = get_latest_ewm_baseline(conn)
+    snapshot_month_ewm, skus_baseline_ewm = get_latest_ewm_baseline(
+        conn,
+        logical_warehouse,
+        )
 
     if skus_baseline_ewm is None or skus_baseline_ewm <= 0:
         raise RuntimeError(
-            "Não foi possível calcular o baseline real do WEPV em baseline_items."
+            f"Não foi possível calcular o baseline real de {logical_warehouse} em baseline_items."
         )
 
     ewm_cov_sql = """
@@ -88,6 +98,7 @@ def build_ewm_cobertura(conn: sqlite3.Connection) -> pd.DataFrame:
             (year_iso * 100 + week_iso) AS yw
         FROM counts
         WHERE source_system = :src
+            AND logical_warehouse = :logical_warehouse
     ),
     primeira AS (
         SELECT material, MIN(yw) AS primeira_yw
@@ -122,6 +133,7 @@ def build_ewm_cobertura(conn: sqlite3.Connection) -> pd.DataFrame:
         ewm_cov_sql,
         {
             "src": EWM_SOURCE,
+            "logical_warehouse": logical_warehouse,
             "baseline": skus_baseline_ewm,
         },
     )
@@ -278,7 +290,7 @@ def main() -> None:
         # ------------------------------------------------------------
         # KPI 1) EWM - cobertura acumulada por semana (ciclo real)
         # ------------------------------------------------------------
-        df_ewm = build_ewm_cobertura(conn)
+        df_ewm = build_ewm_cobertura(conn, "WEPV")
         df_ewm.to_csv(OUT_DIR / "ewm_cobertura_semanal.csv", index=False, encoding="utf-8-sig")
 
         # ------------------------------------------------------------

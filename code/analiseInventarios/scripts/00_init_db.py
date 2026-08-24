@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS counts (
     inv_item TEXT NOT NULL,
     material TEXT NOT NULL,
     warehouse_code TEXT NOT NULL,
+    logical_warehouse TEXT,
 
     count_date TEXT,
     qty_recorded REAL,
@@ -211,6 +212,63 @@ GROUP BY
     week_iso;
 """
 
+def ensure_counts_logical_warehouse(
+    conn: sqlite3.Connection,
+) -> None:
+    """
+    Garante a existência da coluna logical_warehouse em counts.
+
+    Compatibilidade:
+    - bancos novos já recebem a coluna pelo CREATE TABLE;
+    - bancos existentes recebem a coluna via ALTER TABLE;
+    - registros MM existentes usam o próprio warehouse_code;
+    - todo o histórico EWM atual é classificado como WEPV.
+
+    O preenchimento de EWM como WEPV é seguro para o histórico atual,
+    pois os arquivos EWM existentes foram previamente auditados e
+    pertencem exclusivamente ao WEPV.
+    """
+
+    columns = {
+        str(row[1])
+        for row in conn.execute("PRAGMA table_info(counts)").fetchall()
+    }
+
+    if "logical_warehouse" not in columns:
+        conn.execute(
+            """
+            ALTER TABLE counts
+            ADD COLUMN logical_warehouse TEXT
+            """
+        )
+
+    # MM: warehouse_code já representa o depósito lógico
+    # (MAST / MASR).
+    conn.execute(
+        """
+        UPDATE counts
+        SET logical_warehouse = warehouse_code
+        WHERE source_system = 'MM'
+          AND (
+              logical_warehouse IS NULL
+              OR TRIM(logical_warehouse) = ''
+          )
+        """
+    )
+
+    # Histórico EWM existente: todos os registros atuais foram
+    # comprovadamente originados do WEPV.
+    conn.execute(
+        """
+        UPDATE counts
+        SET logical_warehouse = 'WEPV'
+        WHERE source_system = 'EWM'
+          AND (
+              logical_warehouse IS NULL
+              OR TRIM(logical_warehouse) = ''
+          )
+        """
+    )
 
 # ------------------------------------------------------------
 # INICIALIZAÇÃO
@@ -234,6 +292,7 @@ def initialize_database(
 
     with sqlite3.connect(db_path) as conn:
         conn.executescript(SCHEMA)
+        ensure_counts_logical_warehouse(conn)
         conn.commit()
 
 

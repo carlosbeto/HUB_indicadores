@@ -55,7 +55,7 @@ EWM_COLS = {
 INSERT_SQL = """
 INSERT OR REPLACE INTO counts (
   row_uid, source_system, doc_key, item_key,
-  inv_doc, inv_item, material, warehouse_code,
+  inv_doc, inv_item, material, warehouse_code, logical_warehouse,
   count_date, qty_recorded, qty_counted, qty_diff, value_diff,
   status, counted_by,
   storage_area, bin_location, stock_type, wh_order,
@@ -63,7 +63,7 @@ INSERT OR REPLACE INTO counts (
   file_name, loaded_at
 ) VALUES (
   :row_uid, :source_system, :doc_key, :item_key,
-  :inv_doc, :inv_item, :material, :warehouse_code,
+  :inv_doc, :inv_item, :material, :warehouse_code, :logical_warehouse,
   :count_date, :qty_recorded, :qty_counted, :qty_diff, :value_diff,
   :status, :counted_by,
   :storage_area, :bin_location, :stock_type, :wh_order,
@@ -71,7 +71,6 @@ INSERT OR REPLACE INTO counts (
   :file_name, :loaded_at
 );
 """
-
 
 def _to_str(x: Any) -> str:
     if x is None:
@@ -161,6 +160,27 @@ def build_rows(df: pd.DataFrame, source_system: str, file_name: str, loaded_at: 
         material = _to_str(r.get(cols["material"]))
         warehouse_code = _to_str(r.get(cols["warehouse_code"]))
 
+        # Depósito lógico:
+        #
+        # MM:
+        # O próprio campo "Depósito" identifica diretamente o depósito
+        # operacional (MAST, MASR etc.).
+        #
+        # EWM:
+        # O relatório de inventário não possui atualmente uma coluna que
+        # identifique diretamente o depósito lógico (WEPV/WAST). O campo
+        # "Tipo de depósito" representa a estrutura interna do EWM
+        # (T001, PT02, TA01 etc.), portanto não pode ser usado como depósito
+        # lógico.
+        #
+        # Todo o histórico EWM existente pertence ao WEPV. Quando o WAST
+        # entrar em operação, esta regra deverá ser substituída pela
+        # identificação oficial WEPV/WAST definida para os novos relatórios.
+        if source_system == "MM":
+            logical_warehouse = warehouse_code
+        else:
+            logical_warehouse = "WEPV"
+
         count_date = _to_date_iso(r.get(cols["count_date"]))
 
         year_iso = week_iso = None
@@ -215,6 +235,7 @@ def build_rows(df: pd.DataFrame, source_system: str, file_name: str, loaded_at: 
                 inv_item=inv_item,
                 material=material,
                 warehouse_code=warehouse_code,
+                logical_warehouse=logical_warehouse,
                 count_date=count_date,
                 qty_recorded=qty_recorded,
                 qty_counted=qty_counted,

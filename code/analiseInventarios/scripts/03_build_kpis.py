@@ -82,7 +82,7 @@ def build_ewm_cobertura(
     snapshot_month_ewm, skus_baseline_ewm = get_latest_ewm_baseline(
         conn,
         logical_warehouse,
-        )
+    )
 
     if skus_baseline_ewm is None or skus_baseline_ewm <= 0:
         raise RuntimeError(

@@ -66,8 +66,9 @@ def _montar_historico_mensal_ewm(
                 """
                 SELECT COUNT(DISTINCT material) AS skus_contados
                 FROM counts
-                WHERE warehouse_code NOT LIKE 'M%'
-                  AND substr(count_date, 1, 7) = ?
+                WHERE source_system = 'EWM'
+                    AND logical_warehouse = 'WEPV'
+                    AND substr(count_date, 1, 7) = ?
                 """,
                 (snapshot_month_hist,),
             ).fetchone()
@@ -694,6 +695,7 @@ def render_ewm_dashboard(
                AND b.snapshot_month = ?
                AND b.warehouse_code = 'WEPV'
             WHERE c.source_system = 'EWM'
+                AND c.logical_warehouse = 'WEPV'
             """,
             (snapshot_month_ewm,),
         ).fetchone()
@@ -709,6 +711,7 @@ def render_ewm_dashboard(
             SELECT COUNT(DISTINCT material) AS skus_contados_total
             FROM counts
             WHERE source_system = 'EWM'
+                AND logical_warehouse = 'WEPV'
             """
         ).fetchone()
 
@@ -756,9 +759,10 @@ def render_ewm_dashboard(
                    AND b.snapshot_month = ?
                    AND b.warehouse_code = 'WEPV'
                 WHERE c.source_system = 'EWM'
-                  AND c.year_iso = ?
-                  AND c.week_iso = ?
-                  AND b.material IS NULL
+                    AND c.logical_warehouse = 'WEPV'
+                    AND c.year_iso = ?
+                    AND c.week_iso = ?
+                    AND b.material IS NULL
                 """,
                 (snapshot_month_ewm, ano_atual_ewm, semana_atual_ewm),
             ).fetchone()
@@ -787,8 +791,9 @@ def render_ewm_dashboard(
                    AND b.snapshot_month = ?
                    AND b.warehouse_code = 'WEPV'
                 WHERE c.source_system = 'EWM'
-                  AND substr(c.count_date, 1, 7) = ?
-                  AND b.material IS NULL
+                    AND c.logical_warehouse = 'WEPV'
+                    AND substr(c.count_date, 1, 7) = ?
+                    AND b.material IS NULL
                 """,
                 (snapshot_month_ewm, mes_ref_ewm),
             ).fetchone()
@@ -816,11 +821,12 @@ def render_ewm_dashboard(
                 FROM counts c
                 LEFT JOIN baseline_items b
                     ON b.material = c.material
-                   AND b.snapshot_month = ?
-                   AND b.warehouse_code = 'WEPV'
+                    AND b.snapshot_month = ?
+                    AND b.warehouse_code = 'WEPV'
                 WHERE c.source_system = 'EWM'
-                  AND substr(c.count_date, 1, 7) IN ({placeholders_ewm})
-                  AND b.material IS NULL
+                    AND c.logical_warehouse = 'WEPV'
+                    AND substr(c.count_date, 1, 7) IN ({placeholders_ewm})
+                    AND b.material IS NULL
             """
 
             params_semestre_ewm = [snapshot_month_ewm] + meses_semestre_str_ewm
@@ -1121,11 +1127,12 @@ def render_ewm_dashboard(
                 COUNT(*) AS linhas,
                 COUNT(DISTINCT material) AS skus
             FROM counts
-            WHERE warehouse_code NOT LIKE 'M%'
-            AND substr(count_date, 1, 7) IN ({placeholders})
-            AND counted_by IS NOT NULL
-            AND TRIM(counted_by) <> ''
-            AND UPPER(TRIM(counted_by)) GLOB '[A-Z][A-Z][0-9][0-9][0-9][0-9][0-9][0-9]'
+            WHERE source_system = 'EWM'
+                AND logical_warehouse = 'WEPV'
+                AND substr(count_date, 1, 7) IN ({placeholders})
+                AND counted_by IS NOT NULL
+                AND TRIM(counted_by) <> ''
+                AND UPPER(TRIM(counted_by)) GLOB '[A-Z][A-Z][0-9][0-9][0-9][0-9][0-9][0-9]'
             GROUP BY UPPER(TRIM(counted_by))
             ORDER BY linhas DESC, skus DESC, counted_by
         """

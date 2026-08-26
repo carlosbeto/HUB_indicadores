@@ -10,7 +10,7 @@ Atualiza o projeto a partir do Excel do SAP (snapshot diário), 4MDG e Base Fam�
 - Registra baseline mensal (primeiro dia útil) se ainda não existir
 - Atualiza a dimensão consolidada dim_material a partir do CSV BI e ASSIST
 - Lê base de custo unitário e grava/atualiza dim_material_custo
-- (V3) Lê MB51 (entradas) e grava em fact_mb51_entradas
+- Lê MB51 completa e grava movimentos de entrada e saída em fact_mb51_mov
 - Gera OUTPUT pronto para consumo (MAST + MASR + WEPV):
     - RESUMO
     - EVOLUCAO_MES
@@ -603,7 +603,7 @@ def upsert_dim_material_custo(con: sqlite3.Connection, df: pd.DataFrame, source_
             source_file=excluded.source_file,
             source_last_modified=excluded.source_last_modified,
             load_ts=excluded.load_ts;
-    """, rows)
+        """, rows)
 
 def ensure_fact_snapshot(con: sqlite3.Connection):
     """
@@ -791,69 +791,12 @@ def ensure_fact_mb51_mov(con: sqlite3.Connection):
         );
     """)
 
-
-def ensure_fact_mb51_entradas(con: sqlite3.Connection):
-    """
-    Fato de movimentos MB51 (MAST/depósitos).
-    Chave: (data_lancamento, deposito, material, ordem)
-
-    IMPORTANTE (migração):
-    - Se a tabela já existir, esta função adiciona novas colunas via ALTER TABLE,
-      sem apagar dados.
-    """
-
-    # 1) Cria tabela base (caso ainda não exista)
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS fact_mb51_entradas (
-            data_lancamento TEXT NOT NULL,
-            deposito TEXT NOT NULL,
-            material TEXT NOT NULL,
-            ordem TEXT,
-            descricao_mb51 TEXT,
-            quantidade REAL,
-            custo_unit REAL,
-            valor_estimado REAL,
-
-            -- NOVAS (para separar entrada/saída e auditoria)
-            deb_cred TEXT,          -- 'S' (entrada) / 'H' (saída)
-            tipo_movimento TEXT,    -- ex.: 101/102/261 etc (dependendo do layout)
-            doc_deposito TEXT,      -- opcional (documento do depósito, se você quiser guardar)
-            doc_material TEXT,      -- opcional (doc.material)
-            item_doc_material TEXT, -- opcional (item doc.material)
-
-            source_file TEXT,
-            load_ts TEXT,
-
-            PRIMARY KEY (data_lancamento, deposito, material, ordem)
-        );
-    """)
-
-    # 2) Migração leve: adiciona colunas se a tabela já existia sem elas
-    cols = {row[1] for row in con.execute("PRAGMA table_info(fact_mb51_entradas);").fetchall()}
-
-    def add_col_if_missing(col_name: str, col_type: str):
-        if col_name not in cols:
-            con.execute(f"ALTER TABLE fact_mb51_entradas ADD COLUMN {col_name} {col_type};")
-
-    add_col_if_missing("deb_cred", "TEXT")
-    add_col_if_missing("tipo_movimento", "TEXT")
-    add_col_if_missing("doc_deposito", "TEXT")
-    add_col_if_missing("doc_material", "TEXT")
-    add_col_if_missing("item_doc_material", "TEXT")
-
-
 def ensure_mb51_schema(con: sqlite3.Connection):
     """
-    Mantém compatibilidade com o nome usado no run().
+    Mantém compatibilidade com o nome usado no fluxo principal.
 
-    Papel:
-    - Garantir que a tabela `fact_mb51_entradas` exista e tenha o schema esperado.
-
-    Observação:
-    - Nesta V3, a responsabilidade real de criar/ajustar a tabela está em:
-      `ensure_fact_mb51_mov(con)`.
-    - Esta função é um "alias" para deixar o run() mais legível e evitar divergência
-      de nomes entre versões.
+    Garante a existência da tabela oficial de movimentos MB51:
+    fact_mb51_mov.
     """
     ensure_fact_mb51_mov(con)
 
@@ -951,148 +894,7 @@ def upsert_mb51_mov(con: sqlite3.Connection, df_mb51: pd.DataFrame, source_file:
             valor_estimado=excluded.valor_estimado,
             source_file=excluded.source_file,
             load_ts=excluded.load_ts;
-    """, rows)
-
-
-def upsert_mb51_entradas(con: sqlite3.Connection, df_mb51: pd.DataFrame, source_file: str):
-    """
-    Upsert (insert/update) das entradas MB51 no banco.
-
-    Entrada esperada (df_mb51) — *após filtros do run()*:
-      - data_lancamento (datetime ou texto convertível)
-      - deposito
-      - material
-      - ordem
-      - descricao_mb51
-      - quantidade
-
-    Enriquecimento:
-      - Faz join com `dim_material_custo` para obter custo_unit por material
-      - Calcula valor_estimado = quantidade * custo_unit
-
-    Persistência:
-      - Insere em `fact_mb51_entradas`
-      - Se já existir a mesma chave (data_lancamento, deposito, material, ordem),
-        atualiza os campos via ON CONFLICT DO UPDATE (idempotência por chave).
-    """
-
-    # Garante que a tabela fato exista
-    ensure_fact_mb51_mov(con)
-
-    # Garante que a dimensão de custo exista (mesmo que esteja vazia)
-    ensure_dim_material_custo(con)
-
-    # Timestamp da carga (auditoria)
-    load_ts = now_ts()
-
-    # ------------------------------------------------------------
-    # 1) Carrega custos do banco (dimensão) para enriquecer o MB51
-    # ------------------------------------------------------------
-    custo_df = pd.read_sql_query("SELECT material, custo_unit FROM dim_material_custo;", con)
-
-    # Normaliza material na dimensão para casar com o MB51
-    if not custo_df.empty:
-        custo_df["material"] = custo_df["material"].astype("string").apply(norm_material_text)
-
-    # ------------------------------------------------------------
-    # 2) Normalizações no dataframe do MB51 (chaves e tipos)
-    # ------------------------------------------------------------
-    tmp = df_mb51.copy()
-
-    # material e deposito normalizados para evitar "chaves diferentes" por formatação
-    tmp["material"] = tmp["material"].astype("string").apply(norm_material_text)
-    tmp["deposito"] = tmp["deposito"].astype("string").str.strip().str.upper()
-
-    # ordem: vazio/NaN vira string vazia (chave do upsert inclui ordem)
-    tmp["ordem"] = tmp["ordem"].fillna("").astype("string").str.strip()
-
-    # data_lancamento:
-    # - força datetime
-    # - depois converte para string "YYYY-MM-DD"
-    # Observação: dayfirst=True é comum em relatórios BR
-    tmp["data_lancamento"] = pd.to_datetime(tmp["data_lancamento"], errors="coerce", dayfirst=True)
-    tmp["data_lancamento"] = tmp["data_lancamento"].dt.strftime("%Y-%m-%d")
-
-    # ------------------------------------------------------------
-    # 3) Merge (enriquecimento) com custo_unit
-    # ------------------------------------------------------------
-    # Se custo_df estiver vazio, custo_unit vira NaN e depois 0.0
-    if not custo_df.empty:
-        tmp = tmp.merge(custo_df, on="material", how="left")
-    else:
-        tmp["custo_unit"] = np.nan
-
-    # Converte numéricos de forma defensiva
-    tmp["quantidade"] = pd.to_numeric(tmp["quantidade"], errors="coerce").fillna(0.0)
-    tmp["custo_unit"] = pd.to_numeric(tmp["custo_unit"], errors="coerce").fillna(0.0)
-
-    # Valor estimado (para análises e agregações no Streamlit)
-    tmp["valor_estimado"] = tmp["quantidade"] * tmp["custo_unit"]
-
-    # ------------------------------------------------------------
-    # 4) Monta lista de tuplas (rows) para executemany
-    # ------------------------------------------------------------
-    # Por que montar rows:
-    # - executemany é mais performático do que inserir linha a linha via SQL
-    # - também evita problemas com tipos do pandas direto no sqlite
-    rows = []
-    for _, r in tmp.iterrows():
-        rows.append((
-            r.get("data_lancamento") or "",
-            str(r.get("deposito") or "").strip().upper(),
-            norm_material_text(r.get("material")),
-            str(r.get("ordem") or "").strip(),
-            str(r.get("descricao_mb51") or "").strip(),
-            float(r.get("quantidade") or 0.0),
-            float(r.get("custo_unit") or 0.0),
-            float(r.get("valor_estimado") or 0.0),
-            source_file,
-            load_ts,
-            str(r.get("deb_cred") or "").strip(),
-            str(r.get("tipo_movimento") or "").strip(),
-            str(r.get("doc_deposito") or "").strip(),
-            str(r.get("doc_material") or "").strip(),
-            str(r.get("item_doc_material") or "").strip(),
-))
-
-
-    # sanitize_rows:
-    # - normaliza e garante que não existam None/valores inválidos nas tuplas
-    rows = sanitize_rows(rows)
-
-    # ------------------------------------------------------------
-    # 5) Upsert no SQLite
-    # ------------------------------------------------------------
-    # Chave de conflito:
-    #   (data_lancamento, deposito, material, ordem)
-    #
-    # Isso garante idempotência por chave:
-    # - reprocessar o mesmo arquivo (ou o mesmo período) não deve duplicar linhas
-    #
-    # O UPDATE atualiza:
-    # - descrição, quantidade, custo e valor, além do source_file e load_ts
-    con.executemany("""
-        INSERT INTO fact_mb51_entradas (
-            data_lancamento, deposito, material, ordem, descricao_mb51,
-            quantidade, custo_unit, valor_estimado,
-            source_file, load_ts,
-            deb_cred, tipo_movimento, doc_deposito, doc_material, item_doc_material
-        )
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-        ON CONFLICT(data_lancamento, deposito, material, ordem) DO UPDATE SET
-            descricao_mb51=excluded.descricao_mb51,
-            quantidade=excluded.quantidade,
-            custo_unit=excluded.custo_unit,
-            valor_estimado=excluded.valor_estimado,
-            source_file=excluded.source_file,
-            load_ts=excluded.load_ts,
-            deb_cred=excluded.deb_cred,
-            tipo_movimento=excluded.tipo_movimento,
-            doc_deposito=excluded.doc_deposito,
-            doc_material=excluded.doc_material,
-            item_doc_material=excluded.item_doc_material;
-    """, rows)
-
+        """, rows)
 
 def ensure_baseline_tables(con: sqlite3.Connection):
     """
@@ -1235,7 +1037,8 @@ def compute_and_store_kpi_diario(con: sqlite3.Connection, deposito: str, d: date
     Regras:
     - snapshot do dia: usa snapshot_date = sd (d em YYYY-MM-DD)
     - snapshot anterior: MAX(snapshot_date) < sd para o mesmo depósito
-    - entradas MB51: apenas para MAST, soma fact_mb51_entradas do sd com ordem vazia
+    - entradas MB51: para MAST, usa fact_mb51_mov com deb_cred='S' e ordem vazia
+    - saídas MB51: para MAST, usa fact_mb51_mov com deb_cred='H'
     """
     ensure_kpi_diario_table(con)
     ensure_kpi_diario_cols(con)   # <-- ADICIONA ESTA LINHA

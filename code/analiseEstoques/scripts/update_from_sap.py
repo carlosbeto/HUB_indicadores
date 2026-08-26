@@ -3,7 +3,7 @@
 """
 update_from_sap.py
 
-Atualiza o projeto a partir do Excel do SAP (snapshot diário), 4MDG e Base Família Comercial.
+Atualiza o projeto a partir do snapshot SAP, MB51, CSV BI, ASSIST e base de custos.
 - Lê o SAP (aba Exportação SAPUI5)
 - Calcula totais (qtd_total, val_total)
 - Grava no SQLite (fact_estoque_snapshot)
@@ -297,7 +297,7 @@ def table_has_column(con: sqlite3.Connection, table: str, col: str) -> bool:
 
 
 # ============================================================
-# Loaders (SAP / MB51 / 4MDG / Família Comercial / Custo)
+# Loaders (SAP / MB51 / Custo)
 # ============================================================
 
 def load_sap(path: Path, sheet: str = SAP_SHEET_DEFAULT) -> pd.DataFrame:
@@ -415,134 +415,6 @@ def load_mb51(path: Path, sheet_name: str = "Data") -> pd.DataFrame:
     out = out[out["deb_cred"].isin(["S", "H"])]
 
     return out
-
-
-def load_mdg(path: Path, sheets: List[str]) -> pd.DataFrame:
-    all_rows = []
-    for sh in sheets:
-        try:
-            df = pd.read_excel(path, sheet_name=sh)
-        except Exception:
-            continue
-
-        df.columns = [normalize_colname(c) for c in df.columns]
-
-        col_mat = find_col(df.columns.tolist(), ["Codigo_do_material", "Código_do_material", "Codigo do material", "Material"])
-        col_desc = find_col(df.columns.tolist(), ["Descricao_Curta", "Descrição_Curta", "Descricao Curta"])
-        col_linha = find_col(df.columns.tolist(), ["Linha_Unidade_de_Negocio", "Linha Unidade de Negocio"])
-        col_garantia = find_col(df.columns.tolist(), ["Tempo_de_Garantia", "Tempo de Garantia"])
-        col_proc = find_col(df.columns.tolist(), ["Processamento Material"])
-        col_saida = find_col(df.columns.tolist(), ["Saída Manufatura Produto", "Saida Manufatura Produto"])
-        col_cod_reman = find_col(df.columns.tolist(), ["Codigo_Remanufaturado", "Código_Remanufaturado"])
-        col_obs = find_col(df.columns.tolist(), ["Observacao", "Observação"])
-
-        if not col_mat:
-            continue
-
-        tmp = pd.DataFrame({
-            "material": as_text_series(df[col_mat]).apply(norm_material_text),
-            "descricao_curta": df[col_desc].astype("string") if col_desc else pd.NA,
-            "linha_unid_negocio": df[col_linha].astype("string") if col_linha else pd.NA,
-            "garantia_meses": coerce_num(df[col_garantia]) if col_garantia else pd.NA,
-            "processamento": df[col_proc].astype("string") if col_proc else pd.NA,
-            "saida_manufatura": df[col_saida].astype("string") if col_saida else pd.NA,
-            "codigo_remanufaturado": as_text_series(df[col_cod_reman]).apply(norm_material_text) if col_cod_reman else pd.NA,
-            "observacao": df[col_obs].astype("string") if col_obs else pd.NA,
-            "source_sheet": sh
-        })
-
-        tmp = tmp.dropna(subset=["material"])
-        tmp = tmp[tmp["material"].astype(str).str.strip() != ""]
-        all_rows.append(tmp)
-
-    if not all_rows:
-        return pd.DataFrame(columns=["material", "processamento", "saida_manufatura", "source_sheet"])
-
-    base = pd.concat(all_rows, ignore_index=True)
-
-    for c in ["processamento", "saida_manufatura", "descricao_curta", "linha_unid_negocio", "observacao"]:
-        if c in base.columns:
-            base[c] = base[c].astype("string").str.strip()
-
-    def score_row(r):
-        s = 0
-        proc = r.get("processamento")
-        saida = r.get("saida_manufatura")
-        if pd.notna(proc) and str(proc).strip() != "":
-            s += 2
-        if pd.notna(saida) and str(saida).strip() != "":
-            s += 2
-        if r.get("source_sheet") == "Produto":
-            s += 0.5
-        return s
-
-    base["_score"] = base.apply(score_row, axis=1)
-    base = base.sort_values(["material", "_score"], ascending=[True, False])
-    base = base.drop_duplicates(subset=["material"], keep="first").drop(columns=["_score"])
-    return base
-
-
-def load_familia_base(
-    path: Path,
-    sheet: str,
-    col_material: str,
-    col_grupo: str,
-    col_familia: str,
-    col_subfamilia: str,
-    col_area_negocio: str = "Área Negócio Centro Material"
-) -> pd.DataFrame:
-    """
-    Lê a Base Família Comercial e normaliza as informações por material.
-
-    Campos carregados:
-    - material
-    - grupo
-    - familia
-    - subfamilia
-    - area_negocio  -> BU / unidade de negócio solicitada pela diretoria
-    """
-
-    df = pd.read_excel(path, sheet_name=sheet)
-    df.columns = [normalize_colname(c) for c in df.columns]
-
-    required = [
-        col_material,
-        col_grupo,
-        col_familia,
-        col_subfamilia,
-        col_area_negocio
-    ]
-
-    missing = [c for c in required if c not in df.columns]
-    if missing:
-        raise ValueError(
-            "Base família: colunas não encontradas. "
-            f"Faltando: {missing}. Encontrado: {list(df.columns)}"
-        )
-
-    out = pd.DataFrame({
-        "material": as_text_series(df[col_material]).apply(norm_material_text),
-        "grupo": df[col_grupo].astype("string").str.strip(),
-        "familia": df[col_familia].astype("string").str.strip(),
-        "subfamilia": df[col_subfamilia].astype("string").str.strip(),
-
-        # Nova dimensão solicitada:
-        # origem Excel: 'Área Negócio Centro Material'
-        # nome no banco/app: area_negocio
-        "area_negocio": df[col_area_negocio].astype("string").str.strip(),
-    })
-
-    out = out.dropna(subset=["material"])
-    out = out[out["material"].astype(str).str.strip() != ""]
-
-    out["grupo"] = out["grupo"].fillna("SEM_GRUPO")
-    out["familia"] = out["familia"].fillna("SEM_FAMILIA")
-    out["subfamilia"] = out["subfamilia"].fillna("SEM_SUBFAMILIA")
-    out["area_negocio"] = out["area_negocio"].fillna("SEM_BU")
-
-    out = out.drop_duplicates(subset=["material"], keep="last")
-    return out
-
 
 def load_custo_base(path: Path, sheet: str, col_material: str, col_custo: str) -> pd.DataFrame:
     df = pd.read_excel(path, sheet_name=sheet)
@@ -1496,7 +1368,7 @@ def aplicar_blacklist(df: pd.DataFrame) -> pd.Series:
     Aplica a blacklist operacional do MAST.
 
     O campo processamento agora vem normalizado pelo ASSIST, sem os
-    prefixos numéricos usados anteriormente pela base 4MDG.
+    prefixos numéricos utilizados na estrutura legada.
     """
     item = pd.to_numeric(df["material"], errors="coerce")
     desc = (

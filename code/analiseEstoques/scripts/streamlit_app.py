@@ -93,14 +93,6 @@ COLS_PT = {
     "share_delta_qtd": "% do Impacto em Quantidade",
     "cum_share_qtd": "% Acumulado do Impacto em Quantidade",
 
-    "familia": "Família",
-    "subfamilia": "Subfamília",
-    "grupo": "Grupo",
-    "processamento": "Processamento",
-
-    "linha_unid_negocio": "BU (Unidade de Negócios)",
-    "custo_unit": "Custo Unitário (R$)",
-
 }
 
 # Atenção: sem st.* aqui em cima (pra não executar ao importar)
@@ -1042,61 +1034,6 @@ def load_mb51_diario_real_mes(
     return df
 
 @_cache_data(ttl=120)
-def load_snapshot_material_mes(db_path_str: str, mes_ref: str, material: str) -> dict:
-    db_path = Path(db_path_str)
-    start, next_month = month_bounds(mes_ref)
-
-    with connect_readonly(db_path) as con:
-        baseline_date = con.execute("""
-            SELECT baseline_date
-            FROM baseline_mensal
-            WHERE mes_ref=? AND deposito='MAST';
-        """, (mes_ref,)).fetchone()
-
-        if not baseline_date:
-            return {"ok": False, "motivo": "Sem baseline_mensal para o mês (MAST)."}
-
-        baseline_date = baseline_date[0]
-
-        last_snap = con.execute("""
-            SELECT MAX(snapshot_date)
-            FROM fact_estoque_snapshot
-            WHERE deposito='MAST'
-              AND snapshot_date >= ?
-              AND snapshot_date <  ?;
-        """, (start, next_month)).fetchone()[0]
-
-        if not last_snap:
-            return {"ok": False, "motivo": "Sem snapshot no mês para MAST."}
-
-        qb, vb = con.execute("""
-            SELECT COALESCE(qtd_total,0), COALESCE(val_total,0)
-            FROM fact_estoque_snapshot
-            WHERE deposito='MAST' AND snapshot_date=? AND material=?;
-        """, (baseline_date, str(material))).fetchone() or (0, 0)
-
-        qa, va = con.execute("""
-            SELECT COALESCE(qtd_total,0), COALESCE(val_total,0)
-            FROM fact_estoque_snapshot
-            WHERE deposito='MAST' AND snapshot_date=? AND material=?;
-        """, (last_snap, str(material))).fetchone() or (0, 0)
-
-    qb = float(qb or 0); vb = float(vb or 0)
-    qa = float(qa or 0); va = float(va or 0)
-
-    return {
-        "ok": True,
-        "baseline_date": str(baseline_date),
-        "last_snap": str(last_snap),
-        "qtd_base": qb,
-        "qtd_atual": qa,
-        "delta_qtd": qa - qb,
-        "val_base": vb,
-        "val_atual": va,
-        "delta_val": va - vb,
-    }
-
-@_cache_data(ttl=120)
 def load_ataque_quadrantes_mes(db_path_str: str, mes_ref: str, p: float = 0.70) -> tuple[pd.DataFrame, pd.DataFrame, float, float]:
     db_path = Path(db_path_str)
     start, next_month = month_bounds(mes_ref)
@@ -1141,26 +1078,27 @@ def load_ataque_quadrantes_mes(db_path_str: str, mes_ref: str, p: float = 0.70) 
             WHERE deposito='MAST' AND snapshot_date=?;
         """, con, params=[last_snap])
 
-        d_custo = pd.read_sql_query("""
-            SELECT material, custo_unit
-            FROM dim_material_custo;
-        """, con)
-
-        d_grupo = pd.read_sql_query("""
+        # ------------------------------------------------------------
+        # Dimensão oficial de materiais.
+        #
+        # A estrutura comercial atual é:
+        # BU -> Diretoria -> Segmento.
+        #
+        # O processamento também vem da dim_material, consolidado
+        # a partir da fonte oficial definida no ETL.
+        # ------------------------------------------------------------
+        d_material = pd.read_sql_query(
+            """
             SELECT
                 material,
-                grupo,
-                familia,
-                subfamilia,
-                area_negocio
-            FROM dim_material_grupo;
-        """, con)
-
-        d_proc = pd.read_sql_query("""
-            SELECT material, descricao_curta, linha_unid_negocio, garantia_meses,
-                   processamento, saida_manufatura, codigo_remanufaturado, observacao
-            FROM dim_material_proc;
-        """, con)
+                bu,
+                diretoria,
+                segmento,
+                processamento
+            FROM dim_material;
+            """,
+            con,
+        )
 
     df = df_base.merge(df_atual, on="material", how="outer", suffixes=("_base", "_atual"))
 
@@ -1194,9 +1132,14 @@ def load_ataque_quadrantes_mes(db_path_str: str, mes_ref: str, p: float = 0.70) 
 
     df["quadrante"] = [_quad(av, aq) for av, aq in zip(alto_val.tolist(), alta_qtd.tolist())]
 
-    df = df.merge(d_custo, on="material", how="left")
-    df = df.merge(d_grupo, on="material", how="left")
-    df = df.merge(d_proc,  on="material", how="left")
+    # Acrescenta a hierarquia comercial e o processamento oficiais.
+    # O LEFT JOIN preserva materiais do estoque mesmo quando ainda
+    # não houver classificação correspondente na dim_material.
+    df = df.merge(
+        d_material,
+        on="material",
+        how="left",
+    )
 
     df["mes_ref"] = mes_ref
 
@@ -1958,42 +1901,90 @@ def run():
 )
         df_snap = load_snapshot_saldo_mes(db_path, mes_ref)
 
-        c1, c2 = st.columns(2)
+        st.markdown("**MB51 REAL por dia**")
 
-        with c1:
-            st.markdown("**MB51 REAL por dia**")
+        if df_mb_d is not None and not df_mb_d.empty:
+            for col in [
+                "entradas_val",
+                "saidas_val",
+                "consumo_liq_val",
+                "entradas_qtd",
+                "saidas_qtd",
+                "consumo_liq_qtd",
+            ]:
+                if col in df_mb_d.columns:
+                    df_mb_d[col] = pd.to_numeric(
+                        df_mb_d[col],
+                        errors="coerce",
+                    ).fillna(0)
 
-            if df_mb_d is not None and not df_mb_d.empty:
-                for col in ["entradas_val", "saidas_val", "consumo_liq_val",
-                            "entradas_qtd", "saidas_qtd", "consumo_liq_qtd"]:
-                    if col in df_mb_d.columns:
-                        df_mb_d[col] = pd.to_numeric(df_mb_d[col], errors="coerce").fillna(0)
+            entradas_val_mes = float(df_mb_d["entradas_val"].sum())
+            saidas_val_mes = float(df_mb_d["saidas_val"].sum())
+            consumo_val_mes = float(df_mb_d["consumo_liq_val"].sum())
 
-                entradas_val_mes = float(df_mb_d["entradas_val"].sum())
-                saidas_val_mes   = float(df_mb_d["saidas_val"].sum())
-                consumo_val_mes  = float(df_mb_d["consumo_liq_val"].sum())
+            entradas_qtd_mes = float(df_mb_d["entradas_qtd"].sum())
+            saidas_qtd_mes = float(df_mb_d["saidas_qtd"].sum())
+            consumo_qtd_mes = float(df_mb_d["consumo_liq_qtd"].sum())
+        else:
+            entradas_val_mes = 0.0
+            saidas_val_mes = 0.0
+            consumo_val_mes = 0.0
 
-                entradas_qtd_mes = float(df_mb_d["entradas_qtd"].sum())
-                saidas_qtd_mes   = float(df_mb_d["saidas_qtd"].sum())
-                consumo_qtd_mes  = float(df_mb_d["consumo_liq_qtd"].sum())
-            else:
-                entradas_val_mes = saidas_val_mes = consumo_val_mes = 0.0
-                entradas_qtd_mes = saidas_qtd_mes = consumo_qtd_mes = 0.0
+            entradas_qtd_mes = 0.0
+            saidas_qtd_mes = 0.0
+            consumo_qtd_mes = 0.0
 
-            a, b, c = st.columns(3)
-            a.metric("Entradas mês (valor)", f"{entradas_val_mes:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
-            b.metric("Saídas mês (valor)",   f"{saidas_val_mes:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
-            c.metric("Consumo mês (valor)",  f"{consumo_val_mes:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+        a, b, c = st.columns(3)
 
-            d, e, f = st.columns(3)
-            d.metric("Entradas mês (qtd)", f"{entradas_qtd_mes:,.3f}".replace(",", "X").replace(".", ",").replace("X", "."))
-            e.metric("Saídas mês (qtd)",   f"{saidas_qtd_mes:,.3f}".replace(",", "X").replace(".", ",").replace("X", "."))
-            f.metric("Consumo mês (qtd)",  f"{consumo_qtd_mes:,.3f}".replace(",", "X").replace(".", ",").replace("X", "."))
+        a.metric(
+            "Entradas mês (valor)",
+            f"{entradas_val_mes:,.2f}"
+            .replace(",", "X")
+            .replace(".", ",")
+            .replace("X", "."),
+        )
 
-        with c2:
-            st.markdown("**Saldo (snapshot) por dia**")
+        b.metric(
+            "Saídas mês (valor)",
+            f"{saidas_val_mes:,.2f}"
+            .replace(",", "X")
+            .replace(".", ",")
+            .replace("X", "."),
+        )
 
-        st.divider()
+        c.metric(
+            "Consumo líquido mês (valor)",
+            f"{consumo_val_mes:,.2f}"
+            .replace(",", "X")
+            .replace(".", ",")
+            .replace("X", "."),
+        )
+
+        d, e, f = st.columns(3)
+
+        d.metric(
+            "Entradas mês (qtd)",
+            f"{entradas_qtd_mes:,.3f}"
+            .replace(",", "X")
+            .replace(".", ",")
+            .replace("X", "."),
+        )
+
+        e.metric(
+            "Saídas mês (qtd)",
+            f"{saidas_qtd_mes:,.3f}"
+            .replace(",", "X")
+            .replace(".", ",")
+            .replace("X", "."),
+        )
+
+        f.metric(
+            "Consumo líquido mês (qtd)",
+            f"{consumo_qtd_mes:,.3f}"
+            .replace(",", "X")
+            .replace(".", ",")
+            .replace("X", "."),
+        )
 
         st.markdown("### KPI Diário REAL (MB51) — tabela")
 
@@ -2102,69 +2093,148 @@ def run():
             df_f = df_f[(df_f["delta_val"] > 0) | (df_f["delta_qtd"] > 0)].copy()
 
         filtros = st.expander("Filtros (dimensões)", expanded=True)
+
         with filtros:
             f1, f2, f3, f4 = st.columns(4)
 
-            if "familia" in df_f.columns:
-                opts = sorted([x for x in df_f["familia"].dropna().unique().tolist() if str(x).strip() != ""])
-                fam_sel = f1.multiselect("Família", options=opts, default=[], key="f_fam")
-            else:
-                fam_sel = []
-
-            if "subfamilia" in df_f.columns:
-                opts = sorted([x for x in df_f["subfamilia"].dropna().unique().tolist() if str(x).strip() != ""])
-                sub_sel = f2.multiselect("Subfamília", options=opts, default=[], key="f_sub")
-            else:
-                sub_sel = []
-
-            if "processamento" in df_f.columns:
-                opts = sorted([x for x in df_f["processamento"].dropna().unique().tolist() if str(x).strip() != ""])
-                proc_sel = f3.multiselect("Processamento", options=opts, default=[], key="f_proc")
-            else:
-                proc_sel = []
-
             # ---------------------------------------------------------
-            # BU oficial vinda da Base Família Comercial
-            # (dim_material_grupo.area_negocio)
+            # BU
             # ---------------------------------------------------------
-            if "area_negocio" in df_f.columns:
-
+            if "bu" in df_f.columns:
                 bu_norm = (
-                    df_f["area_negocio"]
+                    df_f["bu"]
                     .fillna("SEM_BU")
                     .astype(str)
                     .str.strip()
                 )
 
-                opts = sorted([
+                opts_bu = sorted([
                     x for x in bu_norm.unique().tolist()
                     if x != ""
                 ])
 
-                bu_sel = f4.multiselect(
-                    "BU (Unidade de Negócios)",
-                    options=opts,
+                bu_sel = f1.multiselect(
+                    "BU",
+                    options=opts_bu,
                     default=[],
-                    key="f_bu"
+                    key="f_bu",
                 )
-
             else:
                 bu_sel = []
 
-        if fam_sel and "familia" in df_f.columns:
-            df_f = df_f[df_f["familia"].isin(fam_sel)].copy()
-        if sub_sel and "subfamilia" in df_f.columns:
-            df_f = df_f[df_f["subfamilia"].isin(sub_sel)].copy()
-        if proc_sel and "processamento" in df_f.columns:
-            df_f = df_f[df_f["processamento"].isin(proc_sel)].copy()
-        if bu_sel and "area_negocio" in df_f.columns:
+            # ---------------------------------------------------------
+            # Diretoria
+            # ---------------------------------------------------------
+            if "diretoria" in df_f.columns:
+                dir_norm = (
+                    df_f["diretoria"]
+                    .fillna("SEM_DIRETORIA")
+                    .astype(str)
+                    .str.strip()
+                )
+
+                opts_dir = sorted([
+                    x for x in dir_norm.unique().tolist()
+                    if x != ""
+                ])
+
+                diretoria_sel = f2.multiselect(
+                    "Diretoria",
+                    options=opts_dir,
+                    default=[],
+                    key="f_diretoria",
+                )
+            else:
+                diretoria_sel = []
+
+            # ---------------------------------------------------------
+            # Segmento
+            # ---------------------------------------------------------
+            if "segmento" in df_f.columns:
+                seg_norm = (
+                    df_f["segmento"]
+                    .fillna("SEM_SEGMENTO")
+                    .astype(str)
+                    .str.strip()
+                )
+
+                opts_seg = sorted([
+                    x for x in seg_norm.unique().tolist()
+                    if x != ""
+                ])
+
+                segmento_sel = f3.multiselect(
+                    "Segmento",
+                    options=opts_seg,
+                    default=[],
+                    key="f_segmento",
+                )
+            else:
+                segmento_sel = []
+
+            # ---------------------------------------------------------
+            # Processamento
+            # ---------------------------------------------------------
+            if "processamento" in df_f.columns:
+                proc_norm = (
+                    df_f["processamento"]
+                    .fillna("SEM_PROCESSAMENTO")
+                    .astype(str)
+                    .str.strip()
+                )
+
+                opts_proc = sorted([
+                    x for x in proc_norm.unique().tolist()
+                    if x != ""
+                ])
+
+                proc_sel = f4.multiselect(
+                    "Processamento",
+                    options=opts_proc,
+                    default=[],
+                    key="f_proc",
+                )
+            else:
+                proc_sel = []
+
+        # -------------------------------------------------------------
+        # Aplica os filtros selecionados.
+        # -------------------------------------------------------------
+        if bu_sel and "bu" in df_f.columns:
             bu_norm = (
-                df_f["area_negocio"]
+                df_f["bu"]
                 .fillna("SEM_BU")
                 .astype(str)
                 .str.strip()
             )
             df_f = df_f[bu_norm.isin(bu_sel)].copy()
+
+        if diretoria_sel and "diretoria" in df_f.columns:
+            dir_norm = (
+                df_f["diretoria"]
+                .fillna("SEM_DIRETORIA")
+                .astype(str)
+                .str.strip()
+            )
+            df_f = df_f[dir_norm.isin(diretoria_sel)].copy()
+
+        if segmento_sel and "segmento" in df_f.columns:
+            seg_norm = (
+                df_f["segmento"]
+                .fillna("SEM_SEGMENTO")
+                .astype(str)
+                .str.strip()
+            )
+            df_f = df_f[seg_norm.isin(segmento_sel)].copy()
+
+        if proc_sel and "processamento" in df_f.columns:
+            proc_norm = (
+                df_f["processamento"]
+                .fillna("SEM_PROCESSAMENTO")
+                .astype(str)
+                .str.strip()
+            )
+            df_f = df_f[proc_norm.isin(proc_sel)].copy()
 
         if df_f.empty:
             st.warning("Sem dados para os filtros selecionados.")
@@ -2231,7 +2301,7 @@ def run():
 
             "share_delta_val", "cum_share_val",
             "share_delta_qtd", "cum_share_qtd",
-            "familia", "subfamilia", "processamento", "area_negocio"
+            "bu", "diretoria", "segmento", "processamento"
         ]
         cols_show = [c for c in cols_show if c in df_p.columns]
 

@@ -278,13 +278,6 @@ def load_kpi_mensal_mast(
 
     if desconsiderar_mov_343_344:
         filtro_movimento = """
-        AND TRIM(COALESCE(tipo_movimento,'')) NOT IN ('343','344')
-        """
-
-    filtro_movimento = ""
-
-    if desconsiderar_mov_343_344:
-        filtro_movimento = """
           AND TRIM(COALESCE(tipo_movimento, '')) NOT IN ('343', '344')
         """
 
@@ -898,69 +891,6 @@ def load_mb51_diario_real_mes(
 
     return df
 
-
-@_cache_data(ttl=120)
-def load_mb51_resumo_material_mes(
-    db_path_str: str,
-    mes_ref: str,
-    material: str,
-    desconsiderar_mov_343_344: bool = False,
-) -> dict:
-    db_path = Path(db_path_str)
-    start, next_month = month_bounds(mes_ref)
-
-    filtro_movimento = ""
-
-    if desconsiderar_mov_343_344:
-        filtro_movimento = """
-          AND TRIM(COALESCE(tipo_movimento,'')) NOT IN ('343','344')
-        """
-
-    with connect_readonly(db_path) as con:
-        row = con.execute(
-            f"""
-            SELECT
-              COALESCE(SUM(CASE
-                    WHEN deb_cred='S' AND TRIM(COALESCE(ordem,''))=''
-                    THEN quantidade ELSE 0 END), 0) AS entradas_qtd,
-
-              COALESCE(SUM(CASE
-                    WHEN deb_cred='S' AND TRIM(COALESCE(ordem,''))=''
-                    THEN valor_estimado ELSE 0 END), 0) AS entradas_val,
-
-              COALESCE(SUM(CASE
-                    WHEN deb_cred='H'
-                    THEN quantidade ELSE 0 END), 0) AS saidas_qtd,
-
-              COALESCE(SUM(CASE
-                    WHEN deb_cred='H'
-                    THEN valor_estimado ELSE 0 END), 0) AS saidas_val
-
-            FROM fact_mb51_mov
-
-            WHERE deposito='MAST'
-              AND material = ?
-              AND data_lancamento >= ?
-              AND data_lancamento < ?
-              {filtro_movimento};
-            """,
-            (str(material), start, next_month),
-        ).fetchone()
-
-    entradas_qtd, entradas_val, saidas_qtd, saidas_val = [
-        float(x or 0) for x in row
-    ]
-
-    return {
-        "entradas_qtd": entradas_qtd,
-        "entradas_val": entradas_val,
-        "saidas_qtd": saidas_qtd,
-        "saidas_val": saidas_val,
-        "saldo_liq_qtd": entradas_qtd - saidas_qtd,
-        "saldo_liq_val": entradas_val - saidas_val,
-    }
-
-
 @_cache_data(ttl=120)
 def load_snapshot_material_mes(db_path_str: str, mes_ref: str, material: str) -> dict:
     db_path = Path(db_path_str)
@@ -1015,74 +945,6 @@ def load_snapshot_material_mes(db_path_str: str, mes_ref: str, material: str) ->
         "val_atual": va,
         "delta_val": va - vb,
     }
-
-
-@_cache_data(ttl=120)
-def desconsiderar_mov_343_344(
-    db_path_str: str,
-    mes_ref: str,
-    desconsiderar_mov_343_344: bool = False,
-) -> pd.DataFrame:
-    db_path = Path(db_path_str)
-    start, next_month = month_bounds(mes_ref)
-
-    filtro_movimento = ""
-
-    if desconsiderar_mov_343_344:
-        filtro_movimento = """
-          AND TRIM(COALESCE(tipo_movimento,'')) NOT IN ('343','344')
-        """
-
-    with connect_readonly(db_path) as con:
-        df = pd.read_sql_query(
-            f"""
-            SELECT
-              data_lancamento AS dia,
-
-              COALESCE(SUM(CASE
-                    WHEN deb_cred='S'
-                     AND TRIM(COALESCE(ordem,''))=''
-                    THEN quantidade
-                    ELSE 0
-              END), 0) AS entradas_qtd,
-
-              COALESCE(SUM(CASE
-                    WHEN deb_cred='S'
-                     AND TRIM(COALESCE(ordem,''))=''
-                    THEN valor_estimado
-                    ELSE 0
-              END), 0) AS entradas_val,
-
-              COALESCE(SUM(CASE
-                    WHEN deb_cred='H'
-                    THEN quantidade
-                    ELSE 0
-              END), 0) AS saidas_qtd,
-
-              COALESCE(SUM(CASE
-                    WHEN deb_cred='H'
-                    THEN valor_estimado
-                    ELSE 0
-              END), 0) AS saidas_val
-
-            FROM fact_mb51_mov
-
-            WHERE deposito='MAST'
-              AND data_lancamento >= ?
-              AND data_lancamento < ?
-              {filtro_movimento}
-
-            GROUP BY data_lancamento
-            ORDER BY data_lancamento;
-            """,
-            con,
-            params=[start, next_month],
-        )
-
-    df["consumo_liq_qtd"] = df["saidas_qtd"] - df["entradas_qtd"]
-    df["consumo_liq_val"] = df["saidas_val"] - df["entradas_val"]
-
-    return df
 
 @_cache_data(ttl=120)
 def load_ataque_quadrantes_mes(db_path_str: str, mes_ref: str, p: float = 0.70) -> tuple[pd.DataFrame, pd.DataFrame, float, float]:
@@ -1803,7 +1665,11 @@ def run():
                 if baseline_restante_proj_fechamento is not None else "NA"
             )
 
-            df_mb_d = load_mb51_diario_real_mes(db_path, mes_ref)
+            df_mb_d = load_mb51_diario_real_mes(
+                db_path,
+                mes_ref,
+                desconsiderar_mov_343_344,
+            )
 
             if df_mb_d is not None and not df_mb_d.empty and "dia" in df_mb_d.columns and "saidas_val" in df_mb_d.columns:
                 df_plot = df_mb_d[["dia", "saidas_val"]].copy()

@@ -565,14 +565,27 @@ def _load_eficiencia_hierarquia_mast(
     db_path_str: str,
     mes_ref: str,
     group_fields: list[str],
+    desconsiderar_mov_343_344: bool = False,
 ) -> pd.DataFrame:
     """
-    Calcula eficiência financeira por uma hierarquia comercial.
+    Calcula a eficiência financeira do MAST por hierarquia comercial.
 
-    Exemplos de agrupamento:
-    - ["bu"]
-    - ["bu", "diretoria"]
-    - ["bu", "diretoria", "segmento"]
+    Fontes utilizadas:
+    - baseline e saldo atual: fact_estoque_snapshot;
+    - entradas reais: MB51 com débito/crédito = 'S' e ordem vazia;
+    - saídas reais: todos os movimentos MB51 com débito/crédito = 'H';
+    - hierarquia comercial: dim_material.
+
+    O baseline representa a fotografia de referência do saldo do mês.
+
+    As movimentações MB51 são apuradas pelo mês calendário completo
+    (do primeiro dia do mês até o início do mês seguinte), independentemente
+    da data em que o snapshot de baseline foi registrado. Isso preserva
+    o ciclo operacional mensal mesmo quando a baseline é criada após
+    o primeiro dia do mês.
+
+    O filtro opcional 343/344 segue a mesma regra usada nos demais
+    indicadores MB51 do dashboard.
     """
 
     campos_validos = {
@@ -584,29 +597,33 @@ def _load_eficiencia_hierarquia_mast(
     }
 
     if not group_fields:
-        raise ValueError("Informe pelo menos um campo de agrupamento.")
+        raise ValueError(
+            "Informe pelo menos um campo de agrupamento."
+        )
 
     campos_invalidos = set(group_fields) - campos_validos
 
     if campos_invalidos:
         raise ValueError(
-            f"Campos de agrupamento inválidos: {sorted(campos_invalidos)}"
+            f"Campos de agrupamento inválidos: "
+            f"{sorted(campos_invalidos)}"
         )
 
     db_path = Path(db_path_str)
     start, next_month = month_bounds(mes_ref)
 
-    select_hierarquia = ",\n                ".join(
-        [
-            (
-                f"COALESCE(NULLIF(TRIM(dm.{campo}), ''), "
-                f"'SEM_{campo.upper()}') AS {campo}"
-            )
-            for campo in group_fields
-        ]
-    )
+    filtro_movimento = ""
+
+    if desconsiderar_mov_343_344:
+        filtro_movimento = """
+          AND TRIM(COALESCE(tipo_movimento, ''))
+              NOT IN ('343', '344')
+        """
 
     with connect_readonly(db_path) as con:
+        # ------------------------------------------------------------
+        # 1) Descobre a fotografia inicial do ciclo.
+        # ------------------------------------------------------------
         row_base = con.execute(
             """
             SELECT baseline_date
@@ -622,6 +639,9 @@ def _load_eficiencia_hierarquia_mast(
 
         baseline_date = row_base[0]
 
+        # ------------------------------------------------------------
+        # 2) Descobre o snapshot mais recente disponível no mês.
+        # ------------------------------------------------------------
         last_snap = con.execute(
             """
             SELECT MAX(snapshot_date)
@@ -630,109 +650,230 @@ def _load_eficiencia_hierarquia_mast(
               AND snapshot_date >= ?
               AND snapshot_date < ?
             """,
-            (start, next_month),
+            (baseline_date, next_month),
         ).fetchone()[0]
 
         if not last_snap:
             return pd.DataFrame()
 
-        sql_snap = f"""
+        # ------------------------------------------------------------
+        # 3) Baseline por material.
+        # ------------------------------------------------------------
+        df_base = pd.read_sql_query(
+            """
             SELECT
-                fes.snapshot_date,
-                {select_hierarquia},
-                fes.material,
-                COALESCE(fes.val_total, 0) AS val_total
-            FROM fact_estoque_snapshot fes
-            LEFT JOIN dim_material dm
-                ON fes.material = dm.material
-            WHERE fes.deposito = 'MAST'
-              AND fes.snapshot_date >= ?
-              AND fes.snapshot_date <= ?
-        """
-
-        df_snap = pd.read_sql_query(
-            sql_snap,
+                material,
+                SUM(COALESCE(val_total, 0)) AS baseline_val
+            FROM fact_estoque_snapshot
+            WHERE deposito = 'MAST'
+              AND snapshot_date = ?
+            GROUP BY material
+            """,
             con,
-            params=[baseline_date, last_snap],
+            params=[baseline_date],
         )
 
-    if df_snap.empty:
+        # ------------------------------------------------------------
+        # 4) Saldo atual por material.
+        # ------------------------------------------------------------
+        df_atual = pd.read_sql_query(
+            """
+            SELECT
+                material,
+                SUM(COALESCE(val_total, 0)) AS saldo_atual_sap_val
+            FROM fact_estoque_snapshot
+            WHERE deposito = 'MAST'
+              AND snapshot_date = ?
+            GROUP BY material
+            """,
+            con,
+            params=[last_snap],
+        )
+
+        # ------------------------------------------------------------
+        # 5) Movimentos reais MB51 por material.
+        #
+        # Entrada real:
+        #   S + ordem vazia.
+        #
+        # Saída real:
+        #   todo H, independentemente de ordem.
+        # ------------------------------------------------------------
+        df_mov = pd.read_sql_query(
+            f"""
+            SELECT
+                material,
+
+                SUM(
+                    CASE
+                        WHEN deb_cred = 'S'
+                         AND TRIM(COALESCE(ordem, '')) = ''
+                        THEN COALESCE(valor_estimado, 0)
+                        ELSE 0
+                    END
+                ) AS entradas_val,
+
+                SUM(
+                    CASE
+                        WHEN deb_cred = 'H'
+                        THEN COALESCE(valor_estimado, 0)
+                        ELSE 0
+                    END
+                ) AS consumo_real_sap_val
+
+            FROM fact_mb51_mov
+
+            WHERE deposito = 'MAST'
+              AND data_lancamento >= ?
+              AND data_lancamento < ?
+              {filtro_movimento}
+
+            GROUP BY material
+            """,
+            con,
+            params=[
+                start,
+                next_month,
+            ],
+        )
+
+        # ------------------------------------------------------------
+        # 6) Hierarquia comercial oficial por material.
+        # ------------------------------------------------------------
+        df_dim = pd.read_sql_query(
+            """
+            SELECT
+                material,
+                bu,
+                diretoria,
+                segmento,
+                centro_lucro,
+                centro_custo
+            FROM dim_material
+            """,
+            con,
+        )
+
+    # ------------------------------------------------------------
+    # 7) Consolida posição + movimentação no nível material.
+    # ------------------------------------------------------------
+    df_calc = (
+        df_base
+        .merge(
+            df_atual,
+            on="material",
+            how="outer",
+        )
+        .merge(
+            df_mov,
+            on="material",
+            how="outer",
+        )
+        .merge(
+            df_dim,
+            on="material",
+            how="left",
+        )
+    )
+
+    if df_calc.empty:
         return pd.DataFrame()
 
-    df_snap["val_total"] = pd.to_numeric(
-        df_snap["val_total"],
-        errors="coerce",
-    ).fillna(0.0)
+    # ------------------------------------------------------------
+    # 8) Valores ausentes significam ausência daquele componente
+    # para o material no período.
+    # ------------------------------------------------------------
+    colunas_valor = [
+        "baseline_val",
+        "entradas_val",
+        "consumo_real_sap_val",
+        "saldo_atual_sap_val",
+    ]
 
-    datas = sorted(
-        df_snap["snapshot_date"]
-        .dropna()
-        .unique()
-        .tolist()
-    )
+    for coluna in colunas_valor:
+        df_calc[coluna] = pd.to_numeric(
+            df_calc[coluna],
+            errors="coerce",
+        ).fillna(0.0)
 
-    if baseline_date not in datas:
-        datas.insert(0, baseline_date)
-
-    if last_snap not in datas:
-        datas.append(last_snap)
-
-    index_fields = [*group_fields, "material"]
-
-    pivot = (
-        df_snap.pivot_table(
-            index=index_fields,
-            columns="snapshot_date",
-            values="val_total",
-            aggfunc="sum",
-            fill_value=0.0,
+    # ------------------------------------------------------------
+    # 9) Materiais sem classificação continuam visíveis.
+    # Isso permite auditar eventual perda de cobertura da dimensão.
+    # ------------------------------------------------------------
+    for campo in group_fields:
+        df_calc[campo] = (
+            df_calc[campo]
+            .fillna("")
+            .astype(str)
+            .str.strip()
         )
-        .reindex(columns=datas, fill_value=0.0)
-        .sort_index(axis=1)
-    )
 
-    baseline_por_item = pivot[baseline_date]
-    saldo_atual_por_item = pivot[last_snap]
+        df_calc.loc[
+            df_calc[campo] == "",
+            campo,
+        ] = f"SEM_{campo.upper()}"
 
-    deltas = pivot.diff(axis=1).iloc[:, 1:]
-
-    entradas_por_item = deltas.clip(lower=0).sum(axis=1)
-    consumo_por_item = (-deltas.clip(upper=0)).sum(axis=1)
-
-    df_calc = pd.DataFrame(
-        {
-            "baseline_val": baseline_por_item,
-            "entradas_val": entradas_por_item,
-            "consumo_real_sap_val": consumo_por_item,
-            "saldo_atual_sap_val": saldo_atual_por_item,
-        }
-    ).reset_index()
-
+    # ------------------------------------------------------------
+    # 10) Agrega na hierarquia solicitada:
+    # BU, BU/Diretoria, BU/Diretoria/Segmento etc.
+    # ------------------------------------------------------------
     df = (
-        df_calc.groupby(group_fields, as_index=False)
+        df_calc.groupby(
+            group_fields,
+            as_index=False,
+        )
         .agg(
             baseline_val=("baseline_val", "sum"),
             entradas_val=("entradas_val", "sum"),
-            consumo_real_sap_val=("consumo_real_sap_val", "sum"),
-            saldo_atual_sap_val=("saldo_atual_sap_val", "sum"),
+            consumo_real_sap_val=(
+                "consumo_real_sap_val",
+                "sum",
+            ),
+            saldo_atual_sap_val=(
+                "saldo_atual_sap_val",
+                "sum",
+            ),
         )
     )
 
+    # ------------------------------------------------------------
+    # 11) Base disponível no ciclo.
+    # ------------------------------------------------------------
     df["base_disponivel_val"] = (
-        df["baseline_val"] + df["entradas_val"]
+        df["baseline_val"]
+        + df["entradas_val"]
     )
 
+    # ------------------------------------------------------------
+    # 12) Eficiência:
+    # consumo real / base disponível.
+    # ------------------------------------------------------------
     df["eficiencia_disponibilidade_pct"] = np.where(
         df["base_disponivel_val"] > 0,
-        df["consumo_real_sap_val"] / df["base_disponivel_val"],
+        (
+            df["consumo_real_sap_val"]
+            / df["base_disponivel_val"]
+        ),
         0,
     )
 
+    # Mantém os nomes esperados pela interface atual.
     df["saidas_val"] = df["consumo_real_sap_val"]
-    df["eficiencia_pct"] = df["eficiencia_disponibilidade_pct"]
-    df["baseline_restante"] = df["saldo_atual_sap_val"]
 
-    total_consumo = float(df["consumo_real_sap_val"].sum())
+    df["eficiencia_pct"] = (
+        df["eficiencia_disponibilidade_pct"]
+    )
+
+    df["baseline_restante"] = (
+        df["saldo_atual_sap_val"]
+    )
+
+    # ------------------------------------------------------------
+    # 13) Participação no consumo real.
+    # ------------------------------------------------------------
+    total_consumo = float(
+        df["consumo_real_sap_val"].sum()
+    )
 
     df["participacao_saida_pct"] = np.where(
         total_consumo > 0,
@@ -740,7 +881,12 @@ def _load_eficiencia_hierarquia_mast(
         0,
     )
 
-    total_baseline = float(df["baseline_val"].sum())
+    # ------------------------------------------------------------
+    # 14) Participação no baseline.
+    # ------------------------------------------------------------
+    total_baseline = float(
+        df["baseline_val"].sum()
+    )
 
     df["participacao_baseline_pct"] = np.where(
         total_baseline > 0,
@@ -754,6 +900,7 @@ def _load_eficiencia_hierarquia_mast(
         "Baixo impacto",
     )
 
+    # Datas usadas para auditoria da tela.
     df["baseline_date"] = baseline_date
     df["last_snapshot_date"] = last_snap
 
@@ -764,16 +911,17 @@ def _load_eficiencia_hierarquia_mast(
 
     return df
 
-
 @_cache_data(ttl=120)
 def load_eficiencia_bu_mast(
     db_path_str: str,
     mes_ref: str,
+    desconsiderar_mov_343_344: bool = False,
 ) -> pd.DataFrame:
     df = _load_eficiencia_hierarquia_mast(
         db_path_str=db_path_str,
         mes_ref=mes_ref,
         group_fields=["bu"],
+        desconsiderar_mov_343_344=desconsiderar_mov_343_344,
     )
 
     if not df.empty:
@@ -786,6 +934,7 @@ def load_eficiencia_bu_mast(
 def load_eficiencia_segmento_mast(
     db_path_str: str,
     mes_ref: str,
+    desconsiderar_mov_343_344: bool = False,
 ) -> pd.DataFrame:
     return _load_eficiencia_hierarquia_mast(
         db_path_str=db_path_str,
@@ -795,6 +944,7 @@ def load_eficiencia_segmento_mast(
             "diretoria",
             "segmento",
         ],
+        desconsiderar_mov_343_344=desconsiderar_mov_343_344,
     )
 
 @_cache_data(ttl=120)
@@ -1217,7 +1367,11 @@ def run():
 
         st.markdown("### Eficiência por BU")
 
-        df_bu = load_eficiencia_bu_mast(db_path, mes_ref)
+        df_bu = load_eficiencia_bu_mast(
+            db_path,
+            mes_ref,
+            desconsiderar_mov_343_344,
+        )
 
         if df_bu.empty:
             st.info("Sem dados suficientes para calcular eficiência por BU.")
@@ -1266,6 +1420,7 @@ def run():
             df_segmento = load_eficiencia_segmento_mast(
                 db_path,
                 mes_ref,
+                desconsiderar_mov_343_344,
             )
 
             if df_segmento.empty:

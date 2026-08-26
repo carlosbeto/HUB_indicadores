@@ -1411,7 +1411,7 @@ def compute_and_store_kpi_diario(con: sqlite3.Connection, deposito: str, d: date
     # ------------------------------------------------------------
     # MB51 (MAST): regra de negócio para eficiência
     # Entradas válidas: deb_cred='S' e ordem vazia (sem OP)
-    # Saídas válidas:   deb_cred='H' e ordem preenchida (com OP)
+    # Saídas válidas:   deb_cred='H' independentemente de ordem
     # net_val/net_qtd:  consumo líquido = saídas - entradas
     # ------------------------------------------------------------
     ent_in_val = 0.0
@@ -1441,8 +1441,7 @@ def compute_and_store_kpi_diario(con: sqlite3.Connection, deposito: str, d: date
             FROM fact_mb51_mov
             WHERE deposito = ?
             AND data_lancamento = ?
-            AND COALESCE(deb_cred,'') = 'H'
-            AND TRIM(COALESCE(ordem,'')) <> '';
+            AND COALESCE(deb_cred,'') = 'H';
         """, (str(deposito).strip().upper(), sd)).fetchone()
 
         sai_val = float(row_out[0] or 0.0)
@@ -2743,7 +2742,7 @@ def run(config_path, snapshot_date=None):
 
             # Log de auditoria (sem variáveis inexistentes)
             entradas_validas = int(((mb_mov["deb_cred"] == "S") & (mb_mov["ordem"] == "")).sum())
-            saidas_validas   = int(((mb_mov["deb_cred"] == "H") & (mb_mov["ordem"] != "")).sum())
+            saidas_validas = int((mb_mov["deb_cred"] == "H").sum())
             total_s          = int((mb_mov["deb_cred"] == "S").sum())
             total_h          = int((mb_mov["deb_cred"] == "H").sum())
 
@@ -2754,7 +2753,7 @@ def run(config_path, snapshot_date=None):
                 "MB51: gravado COMPLETO (sem filtro na carga) | "
                 f"linhas={len(mb_mov)} | S={total_s} | H={total_h} | "
                 f"entradas_validas(S sem OP)={entradas_validas} | "
-                f"saidas_validas(H com OP)={saidas_validas}"
+                f"saidas_validas(todo H)={saidas_validas}"
             )
         else:
             print_step("MB51: sem dados (ok, segue sem)")

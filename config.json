@@ -3,7 +3,6 @@
   "mb51_in_dir": "data/analiseEstoques/MB51_IN",
   "mb51_sheet_name": "Data",
 
-  "db_path": "data/analiseEstoques/DB/estoque.sqlite",
   "output_dir": "data/analiseEstoques/OUTPUT",
   "logs_dir": "data/analiseEstoques/LOGS",
 

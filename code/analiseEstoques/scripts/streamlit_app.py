@@ -98,13 +98,12 @@ COLS_PT = {
 # Atenção: sem st.* aqui em cima (pra não executar ao importar)
 HUB_ROOT = Path(__file__).resolve().parents[3]  # .../HUB_indicadores
 
-db_rel = hub_config_get("estoques.db_path", None) or hub_config_get(
-    "db_path",
+db_rel = hub_config_get(
+    "estoques.db_path",
     "data/analiseEstoques/DB/estoque.sqlite",
 )
 
 DEFAULT_DB = (HUB_ROOT / db_rel).resolve()
-
 
 # =============================================================================
 # Formatação / normalização

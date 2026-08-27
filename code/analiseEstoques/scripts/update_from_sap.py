@@ -2062,7 +2062,14 @@ def run(config_path, snapshot_date=None):
     # Pastas (preferência: caminhos explícitos do config; fallback: padrão no project_root)
     sap_in_cfg = cfg.get("sap_in_dir", project_root / "SAP_IN")
     mb51_in_cfg = cfg.get("mb51_in_dir", project_root / "MB51_IN")
-    db_cfg = cfg.get("db_path", project_root / "DB" / "estoque.sqlite")
+
+    # Banco oficial do módulo de Estoques.
+    # A configuração fica centralizada em estoques.db_path.
+    db_cfg = estoques_cfg.get(
+        "db_path",
+        project_root / "DB" / "estoque.sqlite",
+    )
+
     out_root_cfg = cfg.get("output_dir", project_root / "OUTPUT")
     log_root_cfg = cfg.get("logs_dir", project_root / "LOGS")
 
@@ -2098,17 +2105,6 @@ def run(config_path, snapshot_date=None):
     # ------------------------------------------------------------
     # 3) Resolve caminhos (db_path, sap_in_dir e mb51_in_dir)
     # ------------------------------------------------------------
-    # db_path pode vir no config como:
-    # - absoluto (ex.: \\server\...\DB\estoque.sqlite)
-    # - relativo (ex.: DB/estoque.sqlite)
-    # Regra: se for relativo, resolve contra project_root
-    db_cfg = cfg.get("db_path", project_root / "DB" / "estoque.sqlite")
-    db_path = Path(db_cfg)
-    if not db_path.is_absolute():
-        db_path = (project_root / db_path).resolve()
-    else:
-        db_path = db_path.resolve()
-
     # sap_in_dir (onde está o arquivo principal de snapshot SAP)
     sap_in_cfg = cfg.get("sap_in_dir", project_root / "SAP_IN")
     sap_in = Path(sap_in_cfg)

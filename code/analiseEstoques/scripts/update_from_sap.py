@@ -1622,29 +1622,6 @@ def build_output(con: sqlite3.Connection, deposito: str, d: date, out_dir: Path,
         how="left",
     )
 
-    # Compatibilidade temporária com os outputs e páginas atuais:
-    # grupo      <- BU
-    # familia    <- Diretoria
-    # subfamilia <- Segmento
-    # uni_neg    <- BU
-    base_full["grupo"] = (
-        base_full.get("bu", pd.Series(pd.NA, index=base_full.index))
-        .fillna("SEM_BU")
-    )
-    base_full["familia"] = (
-        base_full.get("diretoria", pd.Series(pd.NA, index=base_full.index))
-        .fillna("SEM_DIRETORIA")
-    )
-    base_full["subfamilia"] = (
-        base_full.get("segmento", pd.Series(pd.NA, index=base_full.index))
-        .fillna("SEM_SEGMENTO")
-    )
-    base_full["uni_neg"] = base_full["grupo"]
-
-    # Campo legado ainda exigido pelo contrato de saída.
-    # A nova arquitetura ainda não possui fonte oficial para esse atributo.
-    base_full["saida_manufatura"] = pd.NA
-
     # -----------------------------
     # 4) Dimensão de custo + ALERTAS + COBERTURA
     # -----------------------------
@@ -1860,12 +1837,22 @@ def build_output(con: sqlite3.Connection, deposito: str, d: date, out_dir: Path,
     # 8) Contrato de colunas
     # -----------------------------
     cols_contrato = [
-        "material", "descricao", "val_total", "qtd_total",
-        "grupo", "processamento", "saida_manufatura",
-        "custo_unit", "valor_total_custo",
-        "uni_neg", "familia", "subfamilia",
+        "material",
+        "descricao",
+        "val_total",
+        "qtd_total",
+        "bu",
+        "diretoria",
+        "segmento",
+        "centro_custo",
+        "centro_lucro",
+        "codigo_centro_lucro",
+        "codigo_centro_sap",
+        "processamento",
+        "custo_unit",
+        "valor_total_custo",
         "cod_ref_item_obsoleto",
-        "blacklist"
+        "blacklist",
     ]
     for c in cols_contrato:
         if c not in base_full.columns:
@@ -1885,27 +1872,6 @@ def build_output(con: sqlite3.Connection, deposito: str, d: date, out_dir: Path,
 
     resumo_alerta = resumo.copy()
 
-        # ---------------------------------------------------------
-    # PRIORIDADE_OPERACIONAL_MAST usa a hierarquia comercial
-    # oficial da dim_material.
-    #
-    # Os aliases abaixo permanecem somente no contrato legado de
-    # BASE_CONSUMO e TOP_MATERIAIS, por compatibilidade externa.
-    # ---------------------------------------------------------
-    prioridade_export = None
-
-    if prioridade_df is not None:
-        prioridade_export = prioridade_df.drop(
-            columns=[
-                "grupo",
-                "familia",
-                "subfamilia",
-                "uni_neg",
-                "saida_manufatura",
-            ],
-            errors="ignore",
-        )
-
     try:
         ret_path = escrever_excel_com_fallback(
             [out_path],
@@ -1914,14 +1880,14 @@ def build_output(con: sqlite3.Connection, deposito: str, d: date, out_dir: Path,
             gerar_top, top_df
         )
 
-        if deposito == "MAST" and prioridade_export is not None:
+        if deposito == "MAST" and prioridade_df is not None:
             with pd.ExcelWriter(
                 ret_path,
                 engine="openpyxl",
                 mode="a",
                 if_sheet_exists="replace",
             ) as xw:
-                prioridade_export.to_excel(
+                prioridade_df.to_excel(
                     xw,
                     index=False,
                     sheet_name="PRIORIDADE_OPERACIONAL_MAST",
@@ -1958,14 +1924,14 @@ def build_output(con: sqlite3.Connection, deposito: str, d: date, out_dir: Path,
                 gerar_top, top_df
             )
 
-            if deposito == "MAST" and prioridade_export is not None:
+            if deposito == "MAST" and prioridade_df is not None:
                 with pd.ExcelWriter(
                     ret_path,
                     engine="openpyxl",
                     mode="a",
                     if_sheet_exists="replace",
                 ) as xw:
-                    prioridade_export.to_excel(
+                    prioridade_df.to_excel(
                         xw,
                         index=False,
                         sheet_name="PRIORIDADE_OPERACIONAL_MAST",

@@ -2053,6 +2053,35 @@ def run(config_path, snapshot_date=None):
     # Lê o JSON de config (utf-8)
     cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
 
+    # ------------------------------------------------------------
+    # Depósitos habilitados para processamento.
+    #
+    # A lista vem do config.json para que novos depósitos possam
+    # entrar no fluxo genérico sem exigir alteração no código.
+    #
+    # Regras específicas de um depósito, como MB51 e prioridade
+    # operacional do MAST, continuam tratadas separadamente.
+    # ------------------------------------------------------------
+    estoques_cfg = cfg.get("estoques", {})
+
+    depositos_cfg = estoques_cfg.get(
+        "depositos",
+        ["MAST", "MASR", "WEPV"],
+    )
+
+    depositos = []
+
+    for dep in depositos_cfg:
+        dep_norm = str(dep).strip().upper()
+
+        if dep_norm and dep_norm not in depositos:
+            depositos.append(dep_norm)
+
+    if not depositos:
+        raise ValueError(
+            "Nenhum depósito foi configurado em estoques.depositos."
+        )
+
     # project_root:
     # - pode vir no config, senão assume a pasta onde está o config.json
     project_root = Path(cfg.get("project_root", cfg_path.parent)).resolve()
@@ -2097,7 +2126,7 @@ def run(config_path, snapshot_date=None):
     log_dir.mkdir(parents=True, exist_ok=True)
 
     # Pastas de output por depósito
-    for dep in ("MAST", "MASR", "WEPV"):
+    for dep in depositos:
         (out_root / dep).mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------
@@ -2350,7 +2379,7 @@ def run(config_path, snapshot_date=None):
         # ------------------------------------------------------------
         # 17) Processamento por depósito (baseline + KPI + output)
         # ------------------------------------------------------------
-        for dep in ["MAST", "MASR", "WEPV"]:
+        for dep in depositos:
             print_step(f"--- Processando depósito {dep} ---")
 
             # baseline:
@@ -2386,7 +2415,7 @@ def run(config_path, snapshot_date=None):
     log_file = log_dir / f"{sd}.log"
 
     with log_file.open("a", encoding="utf-8") as f:
-        for dep in ["MAST", "MASR", "WEPV"]:
+        for dep in depositos:
             out_name = Path(outputs.get(dep, "")).name if outputs.get(dep) else "NA"
 
             f.write(

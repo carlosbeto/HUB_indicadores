@@ -33,6 +33,13 @@
 
   "estoques": {
     "db_path": "data/analiseEstoques/DB/estoque.sqlite",
+
+    "depositos": [
+        "MAST",
+        "MASR",
+        "WEPV"
+    ],
+
     "paths": {
       "mb51_in_dir": "data/analiseEstoques/MB51_IN",
       "sap_in_dir": "data/analiseEstoques/SAP_IN",

@@ -2102,17 +2102,6 @@ def run(config_path, snapshot_date=None):
     for dep in depositos:
         (out_root / dep).mkdir(parents=True, exist_ok=True)
 
-    # ------------------------------------------------------------
-    # 3) Resolve caminhos (db_path, sap_in_dir e mb51_in_dir)
-    # ------------------------------------------------------------
-    # sap_in_dir (onde está o arquivo principal de snapshot SAP)
-    sap_in_cfg = cfg.get("sap_in_dir", project_root / "SAP_IN")
-    sap_in = Path(sap_in_cfg)
-    if not sap_in.is_absolute():
-        sap_in = (project_root / sap_in).resolve()
-    else:
-        sap_in = sap_in.resolve()
-
     # ============================================================
     # 4) MB51 (entradas MAST) — resolve caminho corretamente (V3)
     # ============================================================
@@ -2120,15 +2109,8 @@ def run(config_path, snapshot_date=None):
     # - pasta onde ficam os arquivos MB51MAST*.xlsx
     # mb51_sheet_name:
     # - nome da aba esperada (padrão "Data")
-    mb51_in_cfg = cfg.get("mb51_in_dir", "MB51_IN")
     mb51_sheet_name = cfg.get("mb51_sheet_name", "Data")
     mb51_file = None
-
-    mb51_in = Path(mb51_in_cfg)
-    if not mb51_in.is_absolute():
-        mb51_in = (project_root / mb51_in).resolve()
-    else:
-        mb51_in = mb51_in.resolve()
 
     print_step(f"MB51: procurando pasta em: {mb51_in}")
 

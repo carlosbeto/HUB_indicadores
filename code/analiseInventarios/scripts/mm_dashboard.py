@@ -423,6 +423,7 @@ def _render_indicadores_principais_mm(
     semestre_sel: int,
     fmt_int,
     fmt_pct,
+    fmt_pp,
 ) -> None:
     """Renderiza os dois velocímetros principais do MM."""
 
@@ -596,9 +597,18 @@ def _render_indicadores_principais_mm(
 
                 m1, m2, m3 = st.columns(3)
 
-                m1.metric("Contados no mês", fmt_int(contados_mes))
-                m2.metric("Baseline do mês", fmt_int(baseline_mes))
-                m3.metric("Gap vs meta mensal", fmt_pct(gap_mes))
+                m1.metric(
+                    "Contados no mês",
+                    fmt_int(contados_mes),
+                )
+                m2.metric(
+                    "Baseline do mês",
+                    fmt_int(baseline_mes),
+                )
+                m3.metric(
+                    "Desvio vs meta mensal",
+                    fmt_pp(gap_mes),
+                )
 
         with comp_col2:
             with st.container(border=True):
@@ -606,9 +616,18 @@ def _render_indicadores_principais_mm(
 
                 s1, s2, s3 = st.columns(3)
 
-                s1.metric("Contados acumulados", fmt_int(contados_acumulados))
-                s2.metric("Baseline médio", fmt_int(baseline_medio))
-                s3.metric("Gap vs meta acumulada", fmt_pct(gap_semestre))
+                s1.metric(
+                    "Contados acumulados",
+                    fmt_int(contados_acumulados),
+                )
+                s2.metric(
+                    "Baseline médio",
+                    fmt_int(baseline_medio),
+                )
+                s3.metric(
+                    "Desvio vs meta acumulada",
+                    fmt_pp(gap_semestre),
+                )
 
         st.caption(
             f"Mês de referência: {mes_referencia}. "
@@ -619,23 +638,39 @@ def _render_indicadores_principais_mm(
             f"com a meta acumulada de {fmt_pct(meta_semestre)}."
         )
 
-
 def _render_tabela_evolucao_mm(
     *,
     df_hist_mm: pd.DataFrame,
     deposito_sel: str,
     fmt_int,
     fmt_pct,
+    fmt_pp,
 ) -> None:
-    """Renderiza a tabela de evolução mensal imediatamente abaixo dos gauges."""
+    """
+    Renderiza a evolução mensal do semestre.
+
+    Os nomes técnicos das colunas de cálculo continuam usando "Gap"
+    internamente para preservar o contrato atual do núcleo de indicadores.
+
+    Na interface, porém, a diferença entre cobertura e meta é apresentada
+    corretamente como "Desvio", em pontos percentuais (p.p.).
+    """
 
     with st.container(border=True):
-        st.markdown(f"**Evolução mensal do semestre — {deposito_sel}**")
+        st.markdown(
+            f"**Evolução mensal do semestre — {deposito_sel}**"
+        )
 
         if df_hist_mm.empty:
-            st.info("Sem dados suficientes para montar a evolução mensal do semestre.")
+            st.info(
+                "Sem dados suficientes para montar a evolução mensal "
+                "do semestre."
+            )
             return
 
+        # --------------------------------------------------------
+        # Seleção das colunas técnicas necessárias para a exibição.
+        # --------------------------------------------------------
         df_hist_view = df_hist_mm[
             [
                 "Mês",
@@ -650,17 +685,26 @@ def _render_tabela_evolucao_mm(
             ]
         ].copy()
 
-        # O nome técnico da coluna é mantido no núcleo de indicadores,
-        # mas na tabela usamos um rótulo mais curto para melhorar a leitura.
+        # --------------------------------------------------------
+        # Apenas a camada visual recebe nomes mais claros.
+        #
+        # O DataFrame original e o núcleo de indicadores continuam
+        # usando os nomes técnicos atuais.
+        # --------------------------------------------------------
         df_hist_view = df_hist_view.rename(
             columns={
+                "Gap mês (%)": "Desvio mês (p.p.)",
+                "Gap semestre (%)": "Desvio semestre (p.p.)",
                 "Falta contar para meta (itens)": "Falta contar p/ meta",
             }
         )
 
         def status_com_icone(valor):
-            # Valores ausentes representam períodos sem leitura realizada,
-            # como meses futuros. Eles não devem ser classificados como atraso.
+            """
+            Classifica o desempenho a partir do desvio em relação à meta.
+            """
+
+            # Meses futuros não possuem leitura realizada.
             if pd.isna(valor):
                 return "⚪ Sem leitura"
 
@@ -671,19 +715,30 @@ def _render_tabela_evolucao_mm(
 
             if valor >= 0:
                 return "🟢 Em linha"
+
             if valor >= -5:
                 return "🟡 Atenção"
+
             return "🔴 Atrasado"
 
-        df_hist_view["Status mês"] = df_hist_view["Gap mês (%)"].apply(
-            status_com_icone
+        # --------------------------------------------------------
+        # Status mensal e semestral.
+        # --------------------------------------------------------
+        df_hist_view["Status mês"] = (
+            df_hist_view["Desvio mês (p.p.)"]
+            .apply(status_com_icone)
         )
-        df_hist_view["Status semestre"] = df_hist_view[
-            "Gap semestre (%)"
-        ].apply(status_com_icone)
 
-        def cor_gap(valor):
-            # Sem leitura não recebe cor de desempenho.
+        df_hist_view["Status semestre"] = (
+            df_hist_view["Desvio semestre (p.p.)"]
+            .apply(status_com_icone)
+        )
+
+        def cor_desvio(valor):
+            """
+            Define a cor visual do desvio.
+            """
+
             if pd.isna(valor):
                 return ""
 
@@ -693,20 +748,49 @@ def _render_tabela_evolucao_mm(
                 return ""
 
             if valor >= 0:
-                return "background-color: #d9ead3; color: #274e13;"
+                return (
+                    "background-color: #d9ead3; "
+                    "color: #274e13;"
+                )
+
             if valor >= -5:
-                return "background-color: #fff2cc; color: #7f6000;"
-            return "background-color: #f4cccc; color: #990000;"
+                return (
+                    "background-color: #fff2cc; "
+                    "color: #7f6000;"
+                )
+
+            return (
+                "background-color: #f4cccc; "
+                "color: #990000;"
+            )
 
         def cor_status(valor):
             if "Em linha" in str(valor):
-                return "background-color: #d9ead3; color: #274e13;"
+                return (
+                    "background-color: #d9ead3; "
+                    "color: #274e13;"
+                )
+
             if "Atenção" in str(valor):
-                return "background-color: #fff2cc; color: #7f6000;"
+                return (
+                    "background-color: #fff2cc; "
+                    "color: #7f6000;"
+                )
+
             if "Atrasado" in str(valor):
-                return "background-color: #f4cccc; color: #990000;"
+                return (
+                    "background-color: #f4cccc; "
+                    "color: #990000;"
+                )
+
             return ""
 
+        # --------------------------------------------------------
+        # Formatação da tabela.
+        #
+        # Coberturas e metas continuam sendo percentuais.
+        # Desvios são exibidos em pontos percentuais.
+        # --------------------------------------------------------
         df_hist_style = (
             df_hist_view.style
             .format(
@@ -714,15 +798,27 @@ def _render_tabela_evolucao_mm(
                     "Baseline": lambda x: fmt_int(x),
                     "Contados": lambda x: fmt_int(x),
                     "Cobertura (%)": lambda x: fmt_pct(x),
-                    "Gap mês (%)": lambda x: fmt_pct(x),
+                    "Desvio mês (p.p.)": lambda x: fmt_pp(x),
                     "Meta semestre (%)": lambda x: fmt_pct(x),
                     "Cobertura semestre (%)": lambda x: fmt_pct(x),
-                    "Gap semestre (%)": lambda x: fmt_pct(x),
+                    "Desvio semestre (p.p.)": lambda x: fmt_pp(x),
                     "Falta contar p/ meta": lambda x: fmt_int(x),
                 }
             )
-            .map(cor_gap, subset=["Gap mês (%)", "Gap semestre (%)"])
-            .map(cor_status, subset=["Status mês", "Status semestre"])
+            .map(
+                cor_desvio,
+                subset=[
+                    "Desvio mês (p.p.)",
+                    "Desvio semestre (p.p.)",
+                ],
+            )
+            .map(
+                cor_status,
+                subset=[
+                    "Status mês",
+                    "Status semestre",
+                ],
+            )
         )
 
         st.dataframe(
@@ -732,10 +828,13 @@ def _render_tabela_evolucao_mm(
         )
 
         st.caption(
-            "GAP mês compara a cobertura isolada do mês com a meta mensal "
-            "de 16,67%. GAP semestre compara a evolução acumulada, calculada "
-            "pela soma dos itens contados dividida pela média dos baselines, "
-            "com a meta acumulada."
+            "Desvio mês compara a cobertura isolada do mês com a "
+            "meta mensal de 16,67%. Desvio semestre compara a "
+            "evolução acumulada, calculada pela soma dos itens "
+            "contados dividida pela média dos baselines, com a "
+            "meta acumulada. Valores positivos indicam desempenho "
+            "acima da meta; valores negativos indicam desempenho "
+            "abaixo da meta."
         )
 
 def render_mm_dashboard(
@@ -748,6 +847,7 @@ def render_mm_dashboard(
     semestre_sel: int,
     fmt_int,
     fmt_pct,
+    fmt_pp,
 ) -> None:
     """Renderiza a aba Contagens da semana para os depósitos MM."""
 
@@ -859,6 +959,7 @@ def render_mm_dashboard(
             semestre_sel=int(semestre_sel),
             fmt_int=fmt_int,
             fmt_pct=fmt_pct,
+            fmt_pp=fmt_pp,
         )
 
         _render_tabela_evolucao_mm(
@@ -866,6 +967,7 @@ def render_mm_dashboard(
             deposito_sel=deposito_sel,
             fmt_int=fmt_int,
             fmt_pct=fmt_pct,
+            fmt_pp=fmt_pp,
         )
 
         st.divider()

@@ -57,8 +57,36 @@ def fmt_int(x) -> str:
 
 
 def fmt_pct(x) -> str:
+    """
+    Formata valores percentuais absolutos.
+
+    Exemplos:
+    16.67 -> 16,67%
+    38.93 -> 38,93%
+    """
     try:
         return f"{float(x):.2f}%".replace(".", ",")
+    except Exception:
+        return "-"
+
+def fmt_pp(x) -> str:
+    """
+    Formata diferenças entre percentuais em pontos percentuais.
+
+    Exemplos:
+    2.73  -> +2,73 p.p.
+    0.00  -> 0,00 p.p.
+    -3.25 -> -3,25 p.p.
+    """
+    try:
+        valor = float(x)
+
+        if valor > 0:
+            texto = f"+{valor:.2f}"
+        else:
+            texto = f"{valor:.2f}"
+
+        return f"{texto.replace('.', ',')} p.p."
     except Exception:
         return "-"
 
@@ -539,6 +567,7 @@ with tab3:
         semestre_sel=int(semestre_sel),
         fmt_int=fmt_int,
         fmt_pct=fmt_pct,
+        fmt_pp=fmt_pp,
     )
 
 with tab4:
@@ -554,4 +583,5 @@ with tab4:
         semestre_sel=int(semestre_sel),
         fmt_int=fmt_int,
         fmt_pct=fmt_pct,
+        fmt_pp=fmt_pp,
     )

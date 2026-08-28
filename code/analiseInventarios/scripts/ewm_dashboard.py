@@ -143,6 +143,7 @@ def _render_indicadores_principais_ewm(
     semestre_sel: int,
     fmt_int,
     fmt_pct,
+    fmt_pp,
 ) -> None:
     """Exibe os indicadores principais do WEPV no topo da página."""
 
@@ -314,7 +315,10 @@ def _render_indicadores_principais_ewm(
                 m1, m2, m3 = st.columns(3)
                 m1.metric("Contados no mês", fmt_int(contados_mes_ewm))
                 m2.metric("Baseline do mês", fmt_int(baseline_mes_ewm))
-                m3.metric("Gap vs meta mensal", fmt_pct(gap_mes_ewm))
+                m3.metric(
+                    "Desvio vs meta mensal",
+                    fmt_pp(gap_mes_ewm),
+                )
 
         with comp_col2:
             with st.container(border=True):
@@ -325,10 +329,13 @@ def _render_indicadores_principais_ewm(
                     "Contados acumulados",
                     fmt_int(contados_acumulados_ewm),
                 )
-                s2.metric("Baseline médio", fmt_int(baseline_medio_ewm))
+                s2.metric(
+                    "Baseline médio",
+                    fmt_int(baseline_medio_ewm),
+                )
                 s3.metric(
-                    "Gap vs meta acumulada",
-                    fmt_pct(gap_semestre_ewm),
+                    "Desvio vs meta acumulada",
+                    fmt_pp(gap_semestre_ewm),
                 )
 
         st.caption(
@@ -348,8 +355,17 @@ def _render_evolucao_mensal_ewm(
     semestre_sel: int,
     fmt_int,
     fmt_pct,
+    fmt_pp,
 ) -> None:
-    """Renderiza a tabela e os resumos mensais do WEPV."""
+    """
+    Renderiza a tabela e o resumo executivo mensal do WEPV.
+
+    Os nomes técnicos das colunas continuam usando "Gap" internamente,
+    preservando o contrato atual do núcleo de indicadores.
+
+    Na interface, a diferença entre cobertura e meta é apresentada como
+    "Desvio", em pontos percentuais (p.p.).
+    """
 
     with st.container(border=True):
         st.markdown("**Evolução mensal do semestre — WEPV**")
@@ -361,6 +377,9 @@ def _render_evolucao_mensal_ewm(
             )
             return
 
+        # --------------------------------------------------------
+        # Seleção das colunas técnicas usadas na apresentação.
+        # --------------------------------------------------------
         df_hist_ewm_view = df_hist_ewm[
             [
                 "Mês",
@@ -375,17 +394,18 @@ def _render_evolucao_mensal_ewm(
             ]
         ].copy()
 
-        # O nome técnico permanece no núcleo de indicadores.
-        # Na tabela usamos um rótulo mais curto para facilitar a leitura.
+        # --------------------------------------------------------
+        # Renomeia apenas a camada visual.
+        # --------------------------------------------------------
         df_hist_ewm_view = df_hist_ewm_view.rename(
             columns={
+                "Gap mês (%)": "Desvio mês (p.p.)",
+                "Gap semestre (%)": "Desvio semestre (p.p.)",
                 "Falta contar para meta (itens)": "Falta contar p/ meta",
             }
         )
 
         def status_com_icone(valor):
-            # Valores ausentes representam períodos sem leitura realizada,
-            # como meses futuros. Eles não devem ser classificados como atraso.
             if pd.isna(valor):
                 return "⚪ Sem leitura"
 
@@ -396,19 +416,23 @@ def _render_evolucao_mensal_ewm(
 
             if valor >= 0:
                 return "🟢 Em linha"
+
             if valor >= -5:
                 return "🟡 Atenção"
+
             return "🔴 Atrasado"
 
         df_hist_ewm_view["Status mês"] = (
-            df_hist_ewm_view["Gap mês (%)"].apply(status_com_icone)
-        )
-        df_hist_ewm_view["Status semestre"] = (
-            df_hist_ewm_view["Gap semestre (%)"].apply(status_com_icone)
+            df_hist_ewm_view["Desvio mês (p.p.)"]
+            .apply(status_com_icone)
         )
 
-        def cor_gap(valor):
-            # Sem leitura não recebe cor de desempenho.
+        df_hist_ewm_view["Status semestre"] = (
+            df_hist_ewm_view["Desvio semestre (p.p.)"]
+            .apply(status_com_icone)
+        )
+
+        def cor_desvio(valor):
             if pd.isna(valor):
                 return ""
 
@@ -418,18 +442,41 @@ def _render_evolucao_mensal_ewm(
                 return ""
 
             if valor >= 0:
-                return "background-color: #d9ead3; color: #274e13;"
+                return (
+                    "background-color: #d9ead3; "
+                    "color: #274e13;"
+                )
+
             if valor >= -5:
-                return "background-color: #fff2cc; color: #7f6000;"
-            return "background-color: #f4cccc; color: #990000;"
+                return (
+                    "background-color: #fff2cc; "
+                    "color: #7f6000;"
+                )
+
+            return (
+                "background-color: #f4cccc; "
+                "color: #990000;"
+            )
 
         def cor_status(valor):
             if "Em linha" in str(valor):
-                return "background-color: #d9ead3; color: #274e13;"
+                return (
+                    "background-color: #d9ead3; "
+                    "color: #274e13;"
+                )
+
             if "Atenção" in str(valor):
-                return "background-color: #fff2cc; color: #7f6000;"
+                return (
+                    "background-color: #fff2cc; "
+                    "color: #7f6000;"
+                )
+
             if "Atrasado" in str(valor):
-                return "background-color: #f4cccc; color: #990000;"
+                return (
+                    "background-color: #f4cccc; "
+                    "color: #990000;"
+                )
+
             return ""
 
         df_hist_ewm_style = (
@@ -439,17 +486,26 @@ def _render_evolucao_mensal_ewm(
                     "Baseline": lambda x: fmt_int(x),
                     "Contados": lambda x: fmt_int(x),
                     "Cobertura (%)": lambda x: fmt_pct(x),
-                    "Gap mês (%)": lambda x: fmt_pct(x),
+                    "Desvio mês (p.p.)": lambda x: fmt_pp(x),
                     "Meta semestre (%)": lambda x: fmt_pct(x),
                     "Cobertura semestre (%)": lambda x: fmt_pct(x),
-                    "Gap semestre (%)": lambda x: fmt_pct(x),
+                    "Desvio semestre (p.p.)": lambda x: fmt_pp(x),
                     "Falta contar p/ meta": lambda x: fmt_int(x),
                 }
             )
-            .map(cor_gap, subset=["Gap mês (%)", "Gap semestre (%)"])
+            .map(
+                cor_desvio,
+                subset=[
+                    "Desvio mês (p.p.)",
+                    "Desvio semestre (p.p.)",
+                ],
+            )
             .map(
                 cor_status,
-                subset=["Status mês", "Status semestre"],
+                subset=[
+                    "Status mês",
+                    "Status semestre",
+                ],
             )
         )
 
@@ -459,9 +515,9 @@ def _render_evolucao_mensal_ewm(
             hide_index=True,
         )
 
-        # A leitura executiva utiliza o último mês já ocorrido.
-        # A máscara vem do histórico original, que é a fonte da regra temporal,
-        # e os índices são preservados em df_hist_ewm_view.
+        # --------------------------------------------------------
+        # Leitura executiva usa somente o último período válido.
+        # --------------------------------------------------------
         df_leitura = df_hist_ewm_view.loc[
             df_hist_ewm["Período válido"]
         ].copy()
@@ -470,11 +526,19 @@ def _render_evolucao_mensal_ewm(
             linha_leitura = df_leitura.iloc[-1]
 
             mes_leitura = str(linha_leitura["Mês"])
-            gap_mes_leitura = float(linha_leitura["Gap mês (%)"])
-            gap_semestre_leitura = float(
-                linha_leitura["Gap semestre (%)"]
+
+            desvio_mes_leitura = float(
+                linha_leitura["Desvio mês (p.p.)"]
             )
-            status_mes_leitura = str(linha_leitura["Status mês"])
+
+            desvio_semestre_leitura = float(
+                linha_leitura["Desvio semestre (p.p.)"]
+            )
+
+            status_mes_leitura = str(
+                linha_leitura["Status mês"]
+            )
+
             status_semestre_leitura = str(
                 linha_leitura["Status semestre"]
             )
@@ -482,6 +546,7 @@ def _render_evolucao_mensal_ewm(
             st.markdown("**Status executivo do ciclo EWM**")
 
             mes_num_leitura = int(mes_leitura[5:7])
+
             mes_indice_semestre = (
                 mes_num_leitura
                 if int(semestre_sel) == 1
@@ -501,18 +566,38 @@ def _render_evolucao_mensal_ewm(
 
             if meses_restantes_semestre > 0:
                 esforco_necessario_mes_ewm = (
-                    max(100.0 - cobertura_semestre_leitura, 0.0)
+                    max(
+                        100.0 - cobertura_semestre_leitura,
+                        0.0,
+                    )
                     / meses_restantes_semestre
                 )
+
             elif cobertura_semestre_leitura >= 100:
                 esforco_necessario_mes_ewm = 0.0
 
             card1, card2, card3, card4, card5 = st.columns(5)
 
-            card1.metric("Mês de referência", mes_leitura)
-            card2.metric("Status do semestre", status_semestre_leitura)
-            card3.metric("GAP mês", fmt_pct(gap_mes_leitura))
-            card4.metric("GAP semestre", fmt_pct(gap_semestre_leitura))
+            card1.metric(
+                "Mês de referência",
+                mes_leitura,
+            )
+
+            card2.metric(
+                "Status do semestre",
+                status_semestre_leitura,
+            )
+
+            card3.metric(
+                "Desvio mês",
+                fmt_pp(desvio_mes_leitura),
+            )
+
+            card4.metric(
+                "Desvio semestre",
+                fmt_pp(desvio_semestre_leitura),
+            )
+
             card5.metric(
                 "Esforço necessário / mês",
                 (
@@ -535,17 +620,20 @@ def _render_evolucao_mensal_ewm(
 
             st.caption(
                 f"Leitura do mês: {status_mes_leitura} | "
-                f"GAP mês: {fmt_pct(gap_mes_leitura)}. "
+                f"Desvio mês: {fmt_pp(desvio_mes_leitura)}. "
                 f"Leitura do semestre: {status_semestre_leitura} | "
-                f"GAP semestre: {fmt_pct(gap_semestre_leitura)}."
+                f"Desvio semestre: {fmt_pp(desvio_semestre_leitura)}."
             )
 
         st.caption(
-            "Esta tabela mostra duas leituras de GAP: GAP mês compara a "
-            "cobertura do mês contra a meta mensal de 16,66%; GAP semestre "
-            "compara a evolução acumulada até o mês contra a meta acumulada "
-            "do semestre. Cores: verde = em linha/acima da meta; amarelo = "
-            "atenção; vermelho = atrasado."
+            "Esta tabela apresenta duas leituras de desvio: o desvio "
+            "do mês compara a cobertura do mês com a meta mensal de "
+            "16,67%; o desvio do semestre compara a evolução acumulada "
+            "até o mês com a meta acumulada do semestre. Valores "
+            "positivos indicam desempenho acima da meta; valores "
+            "negativos indicam desempenho abaixo da meta. "
+            "Cores: verde = em linha/acima da meta; amarelo = atenção; "
+            "vermelho = atrasado."
         )
 
 
@@ -557,6 +645,7 @@ def render_ewm_dashboard(
     semestre_sel: int,
     fmt_int,
     fmt_pct,
+    fmt_pp,
 ) -> None:
     """Renderiza a aba Cobertura EWM (WEPV).
 
@@ -622,6 +711,7 @@ def render_ewm_dashboard(
         semestre_sel=semestre_sel,
         fmt_int=fmt_int,
         fmt_pct=fmt_pct,
+        fmt_pp=fmt_pp,
     )
 
     _render_evolucao_mensal_ewm(
@@ -629,6 +719,7 @@ def render_ewm_dashboard(
         semestre_sel=semestre_sel,
         fmt_int=fmt_int,
         fmt_pct=fmt_pct,
+        fmt_pp=fmt_pp,
     )
 
     st.divider()

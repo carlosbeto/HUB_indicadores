@@ -69,6 +69,11 @@ CREATE TABLE IF NOT EXISTS counts (
     stock_type TEXT,
     wh_order TEXT,
 
+    -- Método de inventário físico informado pelo EWM.
+    -- Mantemos o código original do SAP (HS / HL) para preservar
+    -- o significado da fonte. Para inventários MM, permanece NULL.
+    count_method TEXT,
+
     year_iso INTEGER,
     week_iso INTEGER,
     week_start TEXT,
@@ -270,6 +275,38 @@ def ensure_counts_logical_warehouse(
         """
     )
 
+
+def ensure_counts_count_method(
+    conn: sqlite3.Connection,
+) -> None:
+    """
+    Garante a existência da coluna count_method em counts.
+
+    Compatibilidade:
+    - bancos novos já recebem a coluna pelo CREATE TABLE;
+    - bancos existentes recebem a coluna via ALTER TABLE;
+    - o método é um atributo da contagem e não participa das chaves;
+    - registros históricos permanecem NULL até serem reprocessados
+      a partir de uma fonte EWM que contenha HS / HL.
+
+    Não fazemos backfill presumido nesta migração porque o método deve
+    sempre vir da informação oficial registrada no relatório SAP EWM.
+    """
+
+    columns = {
+        str(row[1])
+        for row in conn.execute("PRAGMA table_info(counts)").fetchall()
+    }
+
+    if "count_method" not in columns:
+        conn.execute(
+            """
+            ALTER TABLE counts
+            ADD COLUMN count_method TEXT
+            """
+        )
+
+
 # ------------------------------------------------------------
 # INICIALIZAÇÃO
 # ------------------------------------------------------------
@@ -293,6 +330,7 @@ def initialize_database(
     with sqlite3.connect(db_path) as conn:
         conn.executescript(SCHEMA)
         ensure_counts_logical_warehouse(conn)
+        ensure_counts_count_method(conn)
         conn.commit()
 
 

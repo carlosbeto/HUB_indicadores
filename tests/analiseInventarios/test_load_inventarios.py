@@ -4,6 +4,7 @@ import os
 import runpy
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 
@@ -25,6 +26,7 @@ LOADER = runpy.run_path(str(LOADER_PATH))
 list_xlsx = LOADER["list_xlsx"]
 choose_latest_xlsx = LOADER["choose_latest_xlsx"]
 find_missing_sources = LOADER["find_missing_sources"]
+build_rows = LOADER["build_rows"]
 
 
 def test_choose_latest_xlsx_usa_mtime_e_nao_nome(tmp_path):
@@ -91,3 +93,78 @@ def test_find_missing_sources_exige_mm_e_ewm(
     }
 
     assert find_missing_sources(selected_files) == esperado
+
+
+def test_build_rows_ewm_preserva_metodo_inventario():
+    """
+    O método de inventário físico do EWM deve ser persistido usando
+    o código original do SAP, normalizado para maiúsculas.
+    """
+
+    df = pd.DataFrame(
+        [
+            {
+                "DocInvFísico": "1001",
+                "Item": "1",
+                "Produto": "1234567",
+                "Tipo de depósito": "PT02",
+                "Data de lançamento": "28/08/2026",
+                "Qtd.registrada": 10,
+                "Qtd.cont.inv.": 10,
+                "Quantidade de diferença": 0,
+                "Valor de diferença": 0,
+                "Status do inventário físico": "CONTADO",
+                "Contador": "TESTE",
+                "Área armazmto.": "AREA1",
+                "Posição no depósito": "POS1",
+                "Tipo de estoque": "F2",
+                "Ordem de depósito": "OT1",
+                "Método de inventário físico": "hl",
+            }
+        ]
+    )
+
+    rows = build_rows(
+        df,
+        source_system="EWM",
+        file_name="ewm_teste.xlsx",
+        loaded_at="2026-08-28T14:00:00",
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["count_method"] == "HL"
+
+
+def test_build_rows_mm_mantem_metodo_inventario_nulo():
+    """
+    MM não possui atualmente um método equivalente ao HS/HL do EWM.
+    O atributo deve permanecer NULL, sem classificação presumida.
+    """
+
+    df = pd.DataFrame(
+        [
+            {
+                "Documento inventário": "2001",
+                "Item": "1",
+                "Material": "1234567",
+                "Depósito": "MAST",
+                "Data contagem": "28/08/2026",
+                "Qtd.registrada": 10,
+                "Qtd.contada": 10,
+                "Qtd.diferença": 0,
+                "Status invent.físico": "CONTADO",
+                "Contado por": "TESTE",
+                "Tipo de estoque": "L",
+            }
+        ]
+    )
+
+    rows = build_rows(
+        df,
+        source_system="MM",
+        file_name="mm_teste.xlsx",
+        loaded_at="2026-08-28T14:00:00",
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["count_method"] is None

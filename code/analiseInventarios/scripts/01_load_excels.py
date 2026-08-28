@@ -49,6 +49,7 @@ EWM_COLS = {
     "bin_location": "Posição no depósito",
     "stock_type": "Tipo de estoque",
     "wh_order": "Ordem de depósito",
+    "count_method": "Método de inventário físico",
 }
 
 
@@ -58,7 +59,7 @@ INSERT OR REPLACE INTO counts (
   inv_doc, inv_item, material, warehouse_code, logical_warehouse,
   count_date, qty_recorded, qty_counted, qty_diff, value_diff,
   status, counted_by,
-  storage_area, bin_location, stock_type, wh_order,
+  storage_area, bin_location, stock_type, wh_order, count_method,
   year_iso, week_iso, week_start, week_end,
   file_name, loaded_at
 ) VALUES (
@@ -66,7 +67,7 @@ INSERT OR REPLACE INTO counts (
   :inv_doc, :inv_item, :material, :warehouse_code, :logical_warehouse,
   :count_date, :qty_recorded, :qty_counted, :qty_diff, :value_diff,
   :status, :counted_by,
-  :storage_area, :bin_location, :stock_type, :wh_order,
+  :storage_area, :bin_location, :stock_type, :wh_order, :count_method,
   :year_iso, :week_iso, :week_start, :week_end,
   :file_name, :loaded_at
 );
@@ -244,6 +245,16 @@ def build_rows(df: pd.DataFrame, source_system: str, file_name: str, loaded_at: 
         stock_type = _to_str(r.get(cols.get("stock_type", "")))
         wh_order = _to_str(r.get(cols.get("wh_order", "")))
 
+        # Método de inventário físico é uma informação específica do EWM.
+        # Preservamos os códigos originais do SAP (HS / HL). No MM não há
+        # atualmente um campo equivalente, portanto o banco recebe NULL.
+        if source_system == "EWM":
+            count_method = _to_str(
+                r.get(cols.get("count_method", ""))
+            ).upper() or None
+        else:
+            count_method = None
+
         # Documento (nível doc)
         doc_key = f"{source_system}|{warehouse_code}|{inv_doc}"
 
@@ -287,6 +298,7 @@ def build_rows(df: pd.DataFrame, source_system: str, file_name: str, loaded_at: 
                 bin_location=bin_location_db,
                 stock_type=stock_type or None,
                 wh_order=wh_order_db,
+                count_method=count_method,
                 year_iso=year_iso,
                 week_iso=week_iso,
                 week_start=week_start,

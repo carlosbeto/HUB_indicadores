@@ -126,16 +126,56 @@ def _sha1(text: str) -> str:
     return hashlib.sha1(text.encode("utf-8")).hexdigest()
 
 
-def iter_xlsx(folder: Path) -> list[Path]:
+def list_xlsx(folder: Path) -> list[Path]:
+    """
+    Lista os arquivos Excel válidos disponíveis na pasta de entrada.
+
+    O nome do arquivo não participa da seleção. Isso é intencional:
+    relatórios exportados pelo SAP podem ter nomes diferentes ou ser
+    renomeados pelos usuários sem alterar o conteúdo operacional.
+    """
     if not folder.exists():
         return []
 
-    return sorted([
-        p for p in folder.glob("*.xlsx")
-        if p.is_file()
-        and not p.name.startswith("~$")
-    ])
+    return [
+        path
+        for path in folder.glob("*.xlsx")
+        if path.is_file()
+        and not path.name.startswith("~$")
+    ]
 
+
+def choose_latest_xlsx(folder: Path) -> Optional[Path]:
+    """
+    Seleciona o arquivo Excel fisicamente mais recente da pasta.
+
+    A data de modificação (st_mtime) serve apenas para identificar qual
+    exportação deve ser processada. O período real do inventário continua
+    sendo determinado pelas datas existentes dentro do relatório SAP.
+    """
+    files = list_xlsx(folder)
+
+    if not files:
+        return None
+
+    return max(files, key=lambda path: path.stat().st_mtime)
+
+
+def find_missing_sources(
+    selected_files: dict[str, Optional[Path]],
+) -> list[str]:
+    """
+    Identifica fontes obrigatórias que não possuem arquivo válido.
+
+    Esta função não acessa o banco nem altera arquivos. Ela existe
+    separadamente para tornar explícito e testável o contrato de que
+    o ETL completo exige todas as fontes de Inventários.
+    """
+    return [
+        source
+        for source, file_path in selected_files.items()
+        if file_path is None
+    ]
 
 def read_excel(path: Path) -> pd.DataFrame:
     # Aba padrão: "Data"
@@ -265,37 +305,126 @@ def main() -> None:
 
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
-    mm_files = iter_xlsx(MM_DIR)
-    ewm_files = iter_xlsx(EWM_DIR)
+    # Cada pasta representa uma fonte conhecida.
+    #
+    # O arquivo é escolhido exclusivamente pela data física de modificação.
+    # O nome do .xlsx não define fonte, período ou competência.
+    selected_files = {
+        "MM": choose_latest_xlsx(MM_DIR),
+        "EWM": choose_latest_xlsx(EWM_DIR),
+    }
 
-    if not mm_files and not ewm_files:
-        print("[WARN] Nenhum .xlsx encontrado em MM_IN ou EWM_IN.")
+    # O ETL completo de Inventários exige as duas fontes.
+    #
+    # Não permitimos atualização parcial silenciosa: se MM ou EWM estiver
+    # ausente, o processo é interrompido antes de qualquer leitura ou gravação.
+    missing_sources = find_missing_sources(selected_files)
+
+    if missing_sources:
+        print("[ERRO] ETL de Inventários interrompido.")
+        print("[ERRO] Fontes obrigatórias sem arquivo .xlsx válido:")
+
+        for source in missing_sources:
+            source_dir = MM_DIR if source == "MM" else EWM_DIR
+            print(f"       {source} | pasta={source_dir}")
+
+        print("[ERRO] Banco não foi alterado.")
         return
 
     loaded_at = datetime.now().isoformat(timespec="seconds")
 
+    # ------------------------------------------------------------------
+    # Fase 1 — leitura e validação
+    #
+    # Nenhuma gravação é feita nesta etapa.
+    # Assim, se uma fonte estiver com relatório incorreto ou layout
+    # incompatível, o ETL falha antes de alterar o banco.
+    # ------------------------------------------------------------------
+    prepared_loads: list[tuple[str, Path, list[dict]]] = []
+
+    for source, file_path in selected_files.items():
+        if file_path is None:
+            print(f"[WARN] {source} | nenhum .xlsx encontrado.")
+            continue
+
+        # st_mtime identifica somente qual arquivo físico é o mais recente.
+        # Ele não representa a data da contagem do inventário.
+        modified_at = datetime.fromtimestamp(
+            file_path.stat().st_mtime
+        ).isoformat(timespec="seconds")
+
+        print(
+            f"[INFO] {source} | arquivo selecionado={file_path.name} "
+            f"| modificado_em={modified_at}"
+        )
+
+        df = read_excel(file_path)
+
+        # build_rows também valida o layout esperado para a fonte.
+        # Portanto, um relatório EWM salvo por engano em MM_IN
+        # (ou vice-versa) interrompe o ETL antes da gravação.
+        rows = build_rows(
+            df,
+            source_system=source,
+            file_name=file_path.name,
+            loaded_at=loaded_at,
+        )
+
+        # O período é obtido do conteúdo do SAP, nunca do nome do arquivo.
+        count_dates = [
+            row["count_date"]
+            for row in rows
+            if row["count_date"] is not None
+        ]
+
+        if count_dates:
+            period_start = min(count_dates)
+            period_end = max(count_dates)
+
+            print(
+                f"[INFO] {source} | periodo_dados="
+                f"{period_start} a {period_end}"
+            )
+        else:
+            print(
+                f"[WARN] {source} | nenhuma data de contagem válida "
+                f"encontrada no relatório."
+            )
+
+        prepared_loads.append((source, file_path, rows))
+
+    # ------------------------------------------------------------------
+    # Fase 2 — persistência
+    #
+    # Só chegamos aqui depois que todos os arquivos selecionados foram
+    # lidos e validados com sucesso.
+    # ------------------------------------------------------------------
     conn = sqlite3.connect(DB_PATH)
+
     try:
         total_files = 0
         total_rows = 0
 
-        for source, files in [("MM", mm_files), ("EWM", ewm_files)]:
-            for f in files:
-                df = read_excel(f)
-                rows = build_rows(df, source_system=source, file_name=f.name, loaded_at=loaded_at)
-
-                with conn:
-                    conn.executemany(INSERT_SQL, rows)
+        with conn:
+            for source, file_path, rows in prepared_loads:
+                conn.executemany(INSERT_SQL, rows)
 
                 total_files += 1
                 total_rows += len(rows)
-                print(f"[OK] {source} | {f.name} | linhas={len(rows)}")
 
-        print(f"[DONE] arquivos={total_files} | linhas_processadas={total_rows}")
+                print(
+                    f"[OK] {source} | {file_path.name} "
+                    f"| linhas={len(rows)}"
+                )
+
+        print(
+            f"[DONE] arquivos={total_files} "
+            f"| linhas_processadas={total_rows}"
+        )
         print(f"[DONE] db={DB_PATH}")
+
     finally:
         conn.close()
-
 
 if __name__ == "__main__":
     main()

@@ -341,7 +341,11 @@ def main() -> None:
             print(f"       {source} | pasta={source_dir}")
 
         print("[ERRO] Banco não foi alterado.")
-        return
+
+        # Esta é uma falha impeditiva do ETL, não apenas uma condição
+        # informativa. O código de saída diferente de zero permite que o
+        # orquestrador detecte a falha e interrompa as etapas seguintes.
+        raise SystemExit(1)
 
     loaded_at = datetime.now().isoformat(timespec="seconds")
 

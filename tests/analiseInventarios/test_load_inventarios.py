@@ -27,6 +27,7 @@ list_xlsx = LOADER["list_xlsx"]
 choose_latest_xlsx = LOADER["choose_latest_xlsx"]
 find_missing_sources = LOADER["find_missing_sources"]
 build_rows = LOADER["build_rows"]
+main = LOADER["main"]
 
 
 def test_choose_latest_xlsx_usa_mtime_e_nao_nome(tmp_path):
@@ -94,6 +95,58 @@ def test_find_missing_sources_exige_mm_e_ewm(
 
     assert find_missing_sources(selected_files) == esperado
 
+
+def test_main_falha_quando_fonte_obrigatoria_esta_ausente(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    """
+    A ausência de uma fonte obrigatória deve ser tratada como falha real
+    do processo, e não apenas como uma mensagem de erro no terminal.
+
+    Esse contrato é importante porque o orquestrador usa o código de saída
+    do loader para decidir se pode executar as próximas etapas do ETL.
+    """
+
+    mm_dir = tmp_path / "MM_IN"
+    ewm_dir = tmp_path / "EWM_IN"
+
+    mm_dir.mkdir()
+    ewm_dir.mkdir()
+
+    # Criamos somente a fonte MM. A ausência proposital do arquivo EWM
+    # reproduz, de forma isolada, a falha observada na PROD sem alterar
+    # nenhum arquivo ou banco real do projeto.
+    arquivo_mm = mm_dir / "mm_teste.xlsx"
+    arquivo_mm.touch()
+
+    db_path = tmp_path / "data_db" / "inventarios.sqlite"
+
+    # A função main() foi carregada por runpy. Alterando seus globals para
+    # caminhos temporários, executamos a lógica produtiva em um ambiente
+    # completamente isolado das pastas DEV e PROD.
+    monkeypatch.setitem(main.__globals__, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setitem(main.__globals__, "MM_DIR", mm_dir)
+    monkeypatch.setitem(main.__globals__, "EWM_DIR", ewm_dir)
+    monkeypatch.setitem(main.__globals__, "DB_PATH", db_path)
+
+    with pytest.raises(SystemExit) as exc_info:
+        main()
+
+    # Código diferente de zero comunica ao orquestrador que esta etapa
+    # falhou e que o ETL não deve continuar para as etapas seguintes.
+    assert exc_info.value.code == 1
+
+    saida = capsys.readouterr().out
+
+    assert "[ERRO] ETL de Inventários interrompido." in saida
+    assert "EWM" in saida
+    assert "[ERRO] Banco não foi alterado." in saida
+
+    # Como a falha acontece antes da fase de persistência, nem mesmo o
+    # arquivo SQLite deve ser criado neste cenário.
+    assert not db_path.exists()
 
 def test_build_rows_ewm_preserva_metodo_inventario():
     """

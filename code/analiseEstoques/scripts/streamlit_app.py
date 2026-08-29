@@ -1359,6 +1359,16 @@ def run():
             
             st.markdown("### Detalhamento por Diretoria e Segmento")
 
+            somente_saldo_acima_baseline = st.checkbox(
+                "Mostrar somente saldos acima do baseline",
+                value=False,
+                key=f"filtro_saldo_acima_baseline_{mes_ref}",
+                help=(
+                    "Exibe somente segmentos cujo Saldo atual SAP (R$) "
+                    "é maior que o Baseline inicial (R$) do mês."
+                ),
+            )
+
             df_segmento = load_eficiencia_segmento_mast(
                 db_path,
                 mes_ref,
@@ -1425,6 +1435,24 @@ def run():
                         == filtro_diretoria
                     ].copy()
 
+                # ---------------------------------------------------------
+                # Filtro operacional do PCP
+                #
+                # Um saldo atual acima do baseline indica que o estoque
+                # terminou o período analisado acima do nível existente na
+                # virada do mês. Esses segmentos merecem atenção do PCP
+                # porque o estoque não está sendo reduzido abaixo do ponto
+                # inicial, apesar do processamento/consumo realizado.
+                #
+                # A comparação usa os valores numéricos originais. A
+                # formatação em R$ acontece somente na camada visual.
+                # ---------------------------------------------------------
+                if somente_saldo_acima_baseline:
+                    df_segmento_filtrado = df_segmento_filtrado[
+                        df_segmento_filtrado["saldo_atual_sap_val"]
+                        > df_segmento_filtrado["baseline_val"]
+                    ].copy()
+
                 if df_segmento_filtrado.empty:
                     st.info(
                         "Nenhum segmento encontrado para os filtros selecionados."
@@ -1471,63 +1499,61 @@ def run():
 
                     # -----------------------------------------------------
                     # Montagem da tabela visual
+                    #
+                    # Os valores quantitativos permanecem numéricos até a
+                    # camada de apresentação. Isso permite ao Streamlit:
+                    #
+                    # - reconhecer corretamente números e percentuais;
+                    # - alinhá-los naturalmente à direita;
+                    # - aplicar a formatação localizada do navegador;
+                    # - preservar os dados originais para ordenação e filtros.
+                    #
+                    # Evitamos formatar previamente com _fmt_ptbr_num() e
+                    # _fmt_pct(), pois essas funções transformariam os valores
+                    # em texto e fariam o dataframe tratá-los como strings.
                     # -----------------------------------------------------
                     df_segmento_view = df_segmento_filtrado.copy()
 
+                    # As colunas monetárias são arredondadas somente na
+                    # camada visual. Os valores originais permanecem intactos
+                    # em df_segmento_filtrado para cálculos, filtros e indicadores.
+                    #
+                    # O tipo numérico é preservado para que o Streamlit possa
+                    # aplicar format="localized" e manter o alinhamento à direita.
                     df_segmento_view["Baseline inicial (R$)"] = (
-                        df_segmento_view["baseline_val"].map(
-                            lambda x: _fmt_ptbr_num(x, 2)
-                        )
+                        df_segmento_view["baseline_val"].round(2)
                     )
 
                     df_segmento_view["Entradas SAP (R$)"] = (
-                        df_segmento_view["entradas_val"].map(
-                            lambda x: _fmt_ptbr_num(x, 2)
-                        )
+                        df_segmento_view["entradas_val"].round(2)
                     )
 
                     df_segmento_view["Base disponível (R$)"] = (
-                        df_segmento_view["base_disponivel_val"].map(
-                            lambda x: _fmt_ptbr_num(x, 2)
-                        )
+                        df_segmento_view["base_disponivel_val"].round(2)
                     )
 
                     df_segmento_view["Consumo SAP (R$)"] = (
-                        df_segmento_view[
-                            "consumo_real_sap_val"
-                        ].map(
-                            lambda x: _fmt_ptbr_num(x, 2)
-                        )
+                        df_segmento_view["consumo_real_sap_val"].round(2)
                     )
 
                     df_segmento_view["Saldo atual SAP (R$)"] = (
-                        df_segmento_view[
-                            "saldo_atual_sap_val"
-                        ].map(
-                            lambda x: _fmt_ptbr_num(x, 2)
-                        )
+                        df_segmento_view["saldo_atual_sap_val"].round(2)
                     )
 
                     df_segmento_view["Eficiência"] = (
-                        df_segmento_view["eficiencia_pct"].map(
-                            lambda x: _fmt_pct(x, 1)
-                        )
+                        df_segmento_view["eficiencia_pct"]
                     )
 
                     df_segmento_view["% part. consumo"] = (
                         df_segmento_view[
                             "participacao_consumo_filtrado_pct"
-                        ].map(
-                            lambda x: _fmt_pct(x, 1)
-                        )
+                        ]
                     )
 
                     df_segmento_view["% part. baseline"] = (
                         df_segmento_view[
                             "participacao_baseline_filtrado_pct"
-                        ].map(
-                            lambda x: _fmt_pct(x, 1)
-                        )
+                        ]
                     )
 
                     df_segmento_view = df_segmento_view.rename(
@@ -1567,9 +1593,43 @@ def run():
                                 "% part. baseline",
                             ]
                         ],
+                        column_config={
+                            "Baseline inicial (R$)": st.column_config.NumberColumn(
+                                "Baseline inicial (R$)",
+                                format="localized",
+                            ),
+                            "Entradas SAP (R$)": st.column_config.NumberColumn(
+                                "Entradas SAP (R$)",
+                                format="localized",
+                            ),
+                            "Base disponível (R$)": st.column_config.NumberColumn(
+                                "Base disponível (R$)",
+                                format="localized",
+                            ),
+                            "Consumo SAP (R$)": st.column_config.NumberColumn(
+                                "Consumo SAP (R$)",
+                                format="localized",
+                            ),
+                            "Saldo atual SAP (R$)": st.column_config.NumberColumn(
+                                "Saldo atual SAP (R$)",
+                                format="localized",
+                            ),
+                            "Eficiência": st.column_config.NumberColumn(
+                                "Eficiência",
+                                format="percent",
+                            ),
+                            "% part. consumo": st.column_config.NumberColumn(
+                                "% part. consumo",
+                                format="percent",
+                            ),
+                            "% part. baseline": st.column_config.NumberColumn(
+                                "% part. baseline",
+                                format="percent",
+                            ),
+                        },
                         width="stretch",
                         hide_index=True,
-                    )                        
+                    )
 
             st.markdown("### Participação das BUs nas consumos do mês")
 
@@ -2352,5 +2412,8 @@ def run():
             file_name=nome_arquivo,
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             key=f"dl_pareto_{mes_ref}_{quad_sel}_{int(p*100)}",
+            # O download não precisa reexecutar a página. Evitar esse rerun
+            # também previne referências obsoletas ao XLSX mantido em memória.
+            on_click="ignore",
         )
 

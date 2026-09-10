@@ -1,6 +1,7 @@
 from pathlib import Path
 import sqlite3
-
+import importlib.util
+from contextlib import closing
 
 # ============================================================
 # CAMINHOS DO MÓDULO
@@ -20,7 +21,45 @@ DB_DIR = BASE_DIR / "data_db"
 DB_PATH = DB_DIR / "ressuprimento.sqlite"
 
 
-def criar_banco() -> None:
+def carregar_migration_001():
+    """
+    Carrega a migration 001 diretamente pelo caminho do arquivo.
+
+    O prefixo numérico do nome do arquivo impede importação
+    Python convencional, então usamos importlib.
+    """
+
+    migration_path = (
+        BASE_DIR
+        / "migrations"
+        / "001_cria_plano_parametrizacao.py"
+    )
+
+    if not migration_path.exists():
+        raise FileNotFoundError(
+            "Migration 001 não encontrada. "
+            f"Caminho esperado: {migration_path}"
+        )
+
+    spec = importlib.util.spec_from_file_location(
+        "migration_001_cria_plano_parametrizacao",
+        migration_path,
+    )
+
+    if spec is None or spec.loader is None:
+        raise RuntimeError(
+            "Não foi possível carregar a migration 001."
+        )
+
+    modulo = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(modulo)
+
+    return modulo
+
+
+def criar_banco(
+    db_path: Path | None = None,
+) -> None:
     """
     Cria o banco SQLite do módulo analiseRessuprimento.
 
@@ -36,15 +75,16 @@ def criar_banco() -> None:
        adequada do modelo E/R no DBeaver.
     """
 
-    DB_DIR.mkdir(parents=True, exist_ok=True)
+    banco = db_path if db_path is not None else DB_PATH
+    banco.parent.mkdir(parents=True, exist_ok=True)
 
     print("=" * 70)
     print("CRIANDO BANCO - ANALISE RESSUPRIMENTO")
     print("=" * 70)
-    print(f"Banco: {DB_PATH}")
+    print(f"Banco: {banco}")
     print()
 
-    with sqlite3.connect(DB_PATH) as conn:
+    with closing(sqlite3.connect(banco)) as conn:
 
         # SQLite exige ativação explícita das foreign keys
         # em cada conexão.
@@ -502,6 +542,23 @@ def criar_banco() -> None:
 
         conn.commit()
 
+
+    # ========================================================
+    # 8. MIGRATIONS DO SCHEMA
+    # ========================================================
+    #
+    # Após criar o schema-base, aplicamos as migrations
+    # estruturais conhecidas sobre este mesmo banco.
+    #
+    # Dessa forma, um banco novo nasce já alinhado com a
+    # versão estrutural atual sem duplicar o DDL das migrations
+    # dentro deste arquivo.
+    # ========================================================
+
+    migration_001 = carregar_migration_001()
+    migration_001.aplicar_migration(banco)
+
+    print()
     print("Banco criado/validado com sucesso.")
     print()
     print("Tabelas:")
@@ -512,6 +569,12 @@ def criar_banco() -> None:
     print("  - posicao_material_fontes")
     print("  - etl_execucoes")
     print("  - etl_arquivos_processados")
+    print("  - schema_migrations")
+    print("  - plano_parametrizacao")
+    print("  - plano_parametrizacao_item")
+    print("  - parametrizacao_decisao")
+    print("  - parametrizacao_confirmacao")
+    print("  - parametrizacao_historico")
     print()
     print("Relacionamentos E/R:")
     print("  dim_material 1:N fact_mb51_movimentos")
@@ -519,6 +582,10 @@ def criar_banco() -> None:
     print("  dim_posicao_material 1:N fact_saldo_posicao")
     print("  dim_posicao_material 1:N posicao_material_fontes")
     print("  etl_execucoes 1:N etl_arquivos_processados")
+    print("  plano_parametrizacao 1:N plano_parametrizacao_item")
+    print("  plano_parametrizacao_item 1:N parametrizacao_decisao")
+    print("  parametrizacao_decisao 1:N parametrizacao_confirmacao")
+    print("  plano_parametrizacao_item 1:N parametrizacao_historico")
     print()
     print("=" * 70)
 

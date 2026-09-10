@@ -478,3 +478,64 @@ def atualizar_status_item_apos_decisao(
     )
 
     return cursor.rowcount == 1
+
+def obter_decisao_ativa_item(
+    conn: sqlite3.Connection,
+    *,
+    id_item_plano: int,
+) -> sqlite3.Row | tuple | None:
+    """
+    Retorna a decisão ativa atual do item, se existir.
+    """
+
+    return conn.execute(
+        """
+        SELECT
+            id,
+            numero_revisao,
+            decisao,
+            min_proposto,
+            max_proposto,
+            justificativa,
+            observacao,
+            controlador,
+            decidido_em,
+            alteracao_sap_informada_em,
+            ativo
+        FROM parametrizacao_decisao
+        WHERE
+            id_item_plano = ?
+            AND ativo = 1
+        """,
+        (id_item_plano,),
+    ).fetchone()
+
+
+def inativar_decisao_ativa_item(
+    conn: sqlite3.Connection,
+    *,
+    id_item_plano: int,
+    id_decisao: int,
+) -> bool:
+    """
+    Inativa atomicamente a decisão ativa atual do item.
+
+    A transação é responsabilidade do service chamador.
+    """
+
+    cursor = conn.execute(
+        """
+        UPDATE parametrizacao_decisao
+        SET ativo = 0
+        WHERE
+            id = ?
+            AND id_item_plano = ?
+            AND ativo = 1
+        """,
+        (
+            id_decisao,
+            id_item_plano,
+        ),
+    )
+
+    return cursor.rowcount == 1

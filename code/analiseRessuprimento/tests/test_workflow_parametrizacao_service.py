@@ -13,6 +13,7 @@ from services.plano_parametrizacao_service import (
     criar_plano_parametrizacao,
     liberar_tarefa,
     registrar_decisao,
+    revisar_decisao,
 )
 
 
@@ -983,6 +984,406 @@ class TestWorkflowParametrizacaoService(unittest.TestCase):
                 "USUARIO",
             ),
         )
+
+
+    def test_revisa_decisao_investigar_para_parametrizar(
+        self,
+    ):
+        _, id_item = self._criar_plano(
+            ativar=True
+        )
+
+        assumir_tarefa(
+            self.conn,
+            id_item_plano=id_item,
+            controlador="CONTROLADOR_1",
+        )
+
+        primeira = registrar_decisao(
+            self.conn,
+            id_item_plano=id_item,
+            controlador="CONTROLADOR_1",
+            decisao="INVESTIGAR",
+            justificativa="Validar situação física.",
+        )
+
+        segunda = revisar_decisao(
+            self.conn,
+            id_item_plano=id_item,
+            controlador="CONTROLADOR_1",
+            decisao="PARAMETRIZAR",
+            min_proposto=10.0,
+            max_proposto=50.0,
+        )
+
+        self.assertEqual(
+            primeira["numero_revisao"],
+            1,
+        )
+        self.assertEqual(
+            segunda["numero_revisao"],
+            2,
+        )
+        self.assertEqual(
+            segunda["status_item"],
+            "AGUARDANDO_CONFIRMACAO_SAP",
+        )
+        self.assertEqual(
+            segunda["controlador_responsavel"],
+            "CONTROLADOR_1",
+        )
+
+    def test_revisao_inativa_decisao_anterior(
+        self,
+    ):
+        _, id_item = self._criar_plano(
+            ativar=True
+        )
+
+        assumir_tarefa(
+            self.conn,
+            id_item_plano=id_item,
+            controlador="CONTROLADOR_1",
+        )
+
+        registrar_decisao(
+            self.conn,
+            id_item_plano=id_item,
+            controlador="CONTROLADOR_1",
+            decisao="INVESTIGAR",
+            justificativa="Primeira análise.",
+        )
+
+        revisar_decisao(
+            self.conn,
+            id_item_plano=id_item,
+            controlador="CONTROLADOR_1",
+            decisao="REVISAR_POSTERIORMENTE",
+            justificativa="Aguardar nova informação.",
+        )
+
+        decisoes = self.conn.execute(
+            """
+            SELECT
+                numero_revisao,
+                decisao,
+                ativo
+            FROM parametrizacao_decisao
+            WHERE id_item_plano = ?
+            ORDER BY numero_revisao
+            """,
+            (id_item,),
+        ).fetchall()
+
+        self.assertEqual(
+            decisoes,
+            [
+                (
+                    1,
+                    "INVESTIGAR",
+                    0,
+                ),
+                (
+                    2,
+                    "REVISAR_POSTERIORMENTE",
+                    1,
+                ),
+            ],
+        )
+
+    def test_revisao_mantem_apenas_uma_decisao_ativa(
+        self,
+    ):
+        _, id_item = self._criar_plano(
+            ativar=True
+        )
+
+        assumir_tarefa(
+            self.conn,
+            id_item_plano=id_item,
+            controlador="CONTROLADOR_1",
+        )
+
+        registrar_decisao(
+            self.conn,
+            id_item_plano=id_item,
+            controlador="CONTROLADOR_1",
+            decisao="INVESTIGAR",
+            justificativa="Primeira análise.",
+        )
+
+        revisar_decisao(
+            self.conn,
+            id_item_plano=id_item,
+            controlador="CONTROLADOR_1",
+            decisao="REVISAR_POSTERIORMENTE",
+            justificativa="Segunda análise.",
+        )
+
+        quantidade_ativas = self.conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM parametrizacao_decisao
+            WHERE
+                id_item_plano = ?
+                AND ativo = 1
+            """,
+            (id_item,),
+        ).fetchone()[0]
+
+        self.assertEqual(
+            quantidade_ativas,
+            1,
+        )
+
+    def test_revisao_incrementa_numero_revisao(
+        self,
+    ):
+        _, id_item = self._criar_plano(
+            ativar=True
+        )
+
+        assumir_tarefa(
+            self.conn,
+            id_item_plano=id_item,
+            controlador="CONTROLADOR_1",
+        )
+
+        registrar_decisao(
+            self.conn,
+            id_item_plano=id_item,
+            controlador="CONTROLADOR_1",
+            decisao="INVESTIGAR",
+            justificativa="Primeira análise.",
+        )
+
+        segunda = revisar_decisao(
+            self.conn,
+            id_item_plano=id_item,
+            controlador="CONTROLADOR_1",
+            decisao="REVISAR_POSTERIORMENTE",
+            justificativa="Segunda análise.",
+        )
+
+        terceira = revisar_decisao(
+            self.conn,
+            id_item_plano=id_item,
+            controlador="CONTROLADOR_1",
+            decisao="INVESTIGAR",
+            justificativa="Terceira análise.",
+        )
+
+        self.assertEqual(
+            segunda["numero_revisao"],
+            2,
+        )
+        self.assertEqual(
+            terceira["numero_revisao"],
+            3,
+        )
+
+    def test_revisao_preserva_historico_das_decisoes(
+        self,
+    ):
+        _, id_item = self._criar_plano(
+            ativar=True
+        )
+
+        assumir_tarefa(
+            self.conn,
+            id_item_plano=id_item,
+            controlador="CONTROLADOR_1",
+        )
+
+        registrar_decisao(
+            self.conn,
+            id_item_plano=id_item,
+            controlador="CONTROLADOR_1",
+            decisao="INVESTIGAR",
+            justificativa="Primeira análise.",
+        )
+
+        revisar_decisao(
+            self.conn,
+            id_item_plano=id_item,
+            controlador="CONTROLADOR_1",
+            decisao="REVISAR_POSTERIORMENTE",
+            justificativa="Segunda análise.",
+        )
+
+        revisar_decisao(
+            self.conn,
+            id_item_plano=id_item,
+            controlador="CONTROLADOR_1",
+            decisao="INVESTIGAR",
+            justificativa="Terceira análise.",
+        )
+
+        quantidade = self.conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM parametrizacao_decisao
+            WHERE id_item_plano = ?
+            """,
+            (id_item,),
+        ).fetchone()[0]
+
+        self.assertEqual(
+            quantidade,
+            3,
+        )
+
+    def test_registra_historico_ao_revisar_decisao(
+        self,
+    ):
+        _, id_item = self._criar_plano(
+            ativar=True
+        )
+
+        assumir_tarefa(
+            self.conn,
+            id_item_plano=id_item,
+            controlador="CONTROLADOR_1",
+        )
+
+        registrar_decisao(
+            self.conn,
+            id_item_plano=id_item,
+            controlador="CONTROLADOR_1",
+            decisao="INVESTIGAR",
+            justificativa="Primeira análise.",
+        )
+
+        revisar_decisao(
+            self.conn,
+            id_item_plano=id_item,
+            controlador="CONTROLADOR_1",
+            decisao="PARAMETRIZAR",
+            min_proposto=10.0,
+            max_proposto=50.0,
+        )
+
+        historico = self.conn.execute(
+            """
+            SELECT
+                tipo_evento,
+                status_anterior,
+                status_novo,
+                usuario,
+                origem
+            FROM parametrizacao_historico
+            WHERE
+                id_item_plano = ?
+                AND tipo_evento = 'DECISAO_REVISADA'
+            """,
+            (id_item,),
+        ).fetchone()
+
+        self.assertEqual(
+            historico,
+            (
+                "DECISAO_REVISADA",
+                "EM_ANALISE",
+                "AGUARDANDO_CONFIRMACAO_SAP",
+                "CONTROLADOR_1",
+                "USUARIO",
+            ),
+        )
+
+    def test_rejeita_revisao_por_outro_controlador(
+        self,
+    ):
+        _, id_item = self._criar_plano(
+            ativar=True
+        )
+
+        assumir_tarefa(
+            self.conn,
+            id_item_plano=id_item,
+            controlador="CONTROLADOR_1",
+        )
+
+        registrar_decisao(
+            self.conn,
+            id_item_plano=id_item,
+            controlador="CONTROLADOR_1",
+            decisao="INVESTIGAR",
+            justificativa="Primeira análise.",
+        )
+
+        with self.assertRaises(ValueError):
+            revisar_decisao(
+                self.conn,
+                id_item_plano=id_item,
+                controlador="CONTROLADOR_2",
+                decisao="PARAMETRIZAR",
+                min_proposto=10.0,
+                max_proposto=50.0,
+            )
+
+    def test_rejeita_revisao_sem_decisao_ativa_anterior(
+        self,
+    ):
+        _, id_item = self._criar_plano(
+            ativar=True
+        )
+
+        assumir_tarefa(
+            self.conn,
+            id_item_plano=id_item,
+            controlador="CONTROLADOR_1",
+        )
+
+        with self.assertRaises(ValueError):
+            revisar_decisao(
+                self.conn,
+                id_item_plano=id_item,
+                controlador="CONTROLADOR_1",
+                decisao="PARAMETRIZAR",
+                min_proposto=10.0,
+                max_proposto=50.0,
+            )
+
+    def test_rejeita_revisao_em_plano_nao_ativo(
+        self,
+    ):
+        id_plano, id_item = self._criar_plano(
+            ativar=True
+        )
+
+        assumir_tarefa(
+            self.conn,
+            id_item_plano=id_item,
+            controlador="CONTROLADOR_1",
+        )
+
+        registrar_decisao(
+            self.conn,
+            id_item_plano=id_item,
+            controlador="CONTROLADOR_1",
+            decisao="INVESTIGAR",
+            justificativa="Primeira análise.",
+        )
+
+        self.conn.execute(
+            """
+            UPDATE plano_parametrizacao
+            SET status_plano = 'RASCUNHO'
+            WHERE id = ?
+            """,
+            (id_plano,),
+        )
+        self.conn.commit()
+
+        with self.assertRaises(ValueError):
+            revisar_decisao(
+                self.conn,
+                id_item_plano=id_item,
+                controlador="CONTROLADOR_1",
+                decisao="PARAMETRIZAR",
+                min_proposto=10.0,
+                max_proposto=50.0,
+            )
 
 if __name__ == "__main__":
     unittest.main()

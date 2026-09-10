@@ -1,0 +1,435 @@
+from __future__ import annotations
+
+import math
+import sqlite3
+
+import pandas as pd
+
+from repositories.plano_parametrizacao_repository import (
+    inserir_historico_parametrizacao,
+    inserir_item_plano_parametrizacao,
+    inserir_plano_parametrizacao,
+)
+
+
+STATUS_PLANO_INICIAL = "RASCUNHO"
+STATUS_ITEM_INICIAL = "DISPONIVEL"
+USUARIO_CRIACAO_PADRAO = "SISTEMA"
+
+CRITERIO_PRIORIDADE = "DEMANDA_RELEVANTE_DESC"
+
+
+# ============================================================
+# NORMALIZAÇÃO DE VALORES
+# ============================================================
+
+def _valor_sql(
+    valor,
+):
+    """
+    Converte valores pandas/NumPy ausentes em NULL do SQLite.
+
+    Mantém valores válidos sem alteração.
+    """
+
+    if valor is None:
+        return None
+
+    try:
+        if pd.isna(valor):
+            return None
+    except (TypeError, ValueError):
+        pass
+
+    return valor
+
+
+def _float_sql(
+    valor,
+) -> float | None:
+    """
+    Converte valor numérico para float ou NULL.
+    """
+
+    valor = _valor_sql(valor)
+
+    if valor is None:
+        return None
+
+    numero = float(valor)
+
+    if not math.isfinite(numero):
+        return None
+
+    return numero
+
+
+def _int_sql(
+    valor,
+) -> int | None:
+    """
+    Converte valor numérico para inteiro ou NULL.
+    """
+
+    valor = _valor_sql(valor)
+
+    if valor is None:
+        return None
+
+    return int(valor)
+
+
+# ============================================================
+# VALIDAÇÃO DO SNAPSHOT
+# ============================================================
+
+def _validar_snapshot_plano(
+    df_snapshot: pd.DataFrame,
+) -> None:
+    """
+    Valida se o snapshot possui os dados mínimos necessários
+    para persistir uma onda de parametrização.
+    """
+
+    if df_snapshot is None:
+        raise ValueError(
+            "O snapshot da onda não foi informado."
+        )
+
+    if df_snapshot.empty:
+        raise ValueError(
+            "O snapshot da onda está vazio."
+        )
+
+    colunas_obrigatorias = {
+        "prioridade",
+        "material",
+        "posicao",
+        "descricao_material",
+        "demanda_comercial",
+        "demanda_tecnica",
+        "demanda_relevante",
+        "pct_demanda_acumulada",
+        "quantidade_minima",
+        "quantidade_maxima",
+        "saldo_pt02_f5",
+        "saldo_pt02_b5",
+        "saldo_t001_f5",
+        "saldo_t001_b5",
+        "qtd_posicoes_t001",
+        "situacao_fisica",
+    }
+
+    colunas_ausentes = (
+        colunas_obrigatorias
+        - set(df_snapshot.columns)
+    )
+
+    if colunas_ausentes:
+        raise ValueError(
+            "O snapshot não possui as colunas obrigatórias: "
+            + ", ".join(
+                sorted(colunas_ausentes)
+            )
+        )
+
+    if df_snapshot.duplicated(
+        subset=[
+            "material",
+            "posicao",
+        ]
+    ).any():
+        raise ValueError(
+            "O snapshot possui material + posição PT02 duplicados."
+        )
+
+    if df_snapshot["prioridade"].isna().any():
+        raise ValueError(
+            "O snapshot possui prioridade ausente."
+        )
+
+    if df_snapshot["material"].isna().any():
+        raise ValueError(
+            "O snapshot possui material ausente."
+        )
+
+    if df_snapshot["posicao"].isna().any():
+        raise ValueError(
+            "O snapshot possui posição PT02 ausente."
+        )
+
+    if (
+        pd.to_numeric(
+            df_snapshot["demanda_relevante"],
+            errors="coerce",
+        )
+        .fillna(0.0)
+        .le(0)
+        .any()
+    ):
+        raise ValueError(
+            "Todos os itens do plano devem possuir "
+            "demanda relevante positiva."
+        )
+
+
+# ============================================================
+# PERSISTÊNCIA DO PLANO
+# ============================================================
+
+def criar_plano_parametrizacao(
+    conn: sqlite3.Connection,
+    *,
+    df_snapshot: pd.DataFrame,
+    nome_plano: str,
+    onda: str,
+    data_inicio_demanda: str,
+    data_fim_demanda: str,
+    meses_demanda: int,
+    percentual_alvo_demanda: float,
+    demanda_total_backlog_origem: float,
+    criado_por: str = USUARIO_CRIACAO_PADRAO,
+    observacao: str | None = None,
+) -> dict:
+    """
+    Persiste uma onda de parametrização de forma atômica.
+
+    Fluxo:
+    1. valida o snapshot;
+    2. cria o cabeçalho do plano;
+    3. cria os itens do plano;
+    4. registra ITEM_CRIADO para cada item;
+    5. confirma a transação somente ao final.
+
+    Em qualquer erro, toda a operação é desfeita.
+    """
+
+    _validar_snapshot_plano(
+        df_snapshot
+    )
+
+    if not nome_plano.strip():
+        raise ValueError(
+            "O nome do plano é obrigatório."
+        )
+
+    if not onda.strip():
+        raise ValueError(
+            "A identificação da onda é obrigatória."
+        )
+
+    if meses_demanda <= 0:
+        raise ValueError(
+            "meses_demanda deve ser maior que zero."
+        )
+
+    if (
+        percentual_alvo_demanda <= 0
+        or percentual_alvo_demanda > 100
+    ):
+        raise ValueError(
+            "percentual_alvo_demanda deve estar "
+            "entre 0 e 100."
+        )
+
+    df_persistencia = (
+        df_snapshot
+        .sort_values(
+            by=[
+                "prioridade",
+                "material",
+                "posicao",
+            ],
+            ascending=True,
+        )
+        .reset_index(drop=True)
+    )
+
+    quantidade_materiais = int(
+        len(df_persistencia)
+    )
+
+    demanda_total_plano = float(
+        pd.to_numeric(
+            df_persistencia[
+                "demanda_relevante"
+            ],
+            errors="coerce",
+        ).sum()
+    )
+
+    percentual_real_cobertura = (
+        demanda_total_plano
+        / float(
+            demanda_total_backlog_origem
+        )
+        * 100.0
+    )
+
+    ids_itens: list[int] = []
+
+    try:
+        conn.execute(
+            "BEGIN IMMEDIATE"
+        )
+
+        id_plano = inserir_plano_parametrizacao(
+            conn,
+            nome_plano=nome_plano,
+            onda=onda,
+            data_inicio_demanda=data_inicio_demanda,
+            data_fim_demanda=data_fim_demanda,
+            meses_demanda=meses_demanda,
+            criterio_prioridade=CRITERIO_PRIORIDADE,
+            percentual_alvo_demanda=float(
+                percentual_alvo_demanda
+            ),
+            quantidade_materiais=(
+                quantidade_materiais
+            ),
+            demanda_total_plano=(
+                demanda_total_plano
+            ),
+            demanda_total_backlog_origem=float(
+                demanda_total_backlog_origem
+            ),
+            percentual_real_cobertura=(
+                percentual_real_cobertura
+            ),
+            status_plano=STATUS_PLANO_INICIAL,
+            criado_por=criado_por,
+            observacao=observacao,
+        )
+
+        for _, linha in df_persistencia.iterrows():
+            id_item = inserir_item_plano_parametrizacao(
+                conn,
+                id_plano=id_plano,
+                material=str(
+                    linha["material"]
+                ),
+                posicao_pt02=str(
+                    linha["posicao"]
+                ),
+                descricao_material=_valor_sql(
+                    linha[
+                        "descricao_material"
+                    ]
+                ),
+                prioridade_inicial=int(
+                    linha["prioridade"]
+                ),
+                demanda_comercial_inicial=float(
+                    linha[
+                        "demanda_comercial"
+                    ]
+                ),
+                demanda_tecnica_inicial=float(
+                    linha[
+                        "demanda_tecnica"
+                    ]
+                ),
+                demanda_relevante_inicial=float(
+                    linha[
+                        "demanda_relevante"
+                    ]
+                ),
+                pct_demanda_acumulada_inicial=float(
+                    linha[
+                        "pct_demanda_acumulada"
+                    ]
+                ),
+                min_inicial=_float_sql(
+                    linha[
+                        "quantidade_minima"
+                    ]
+                ),
+                max_inicial=_float_sql(
+                    linha[
+                        "quantidade_maxima"
+                    ]
+                ),
+                saldo_pt02_f5_inicial=_float_sql(
+                    linha[
+                        "saldo_pt02_f5"
+                    ]
+                ),
+                saldo_pt02_b5_inicial=_float_sql(
+                    linha[
+                        "saldo_pt02_b5"
+                    ]
+                ),
+                saldo_t001_f5_inicial=(
+                    _float_sql(
+                        linha[
+                            "saldo_t001_f5"
+                        ]
+                    )
+                    or 0.0
+                ),
+                saldo_t001_b5_inicial=(
+                    _float_sql(
+                        linha[
+                            "saldo_t001_b5"
+                        ]
+                    )
+                    or 0.0
+                ),
+                qtd_posicoes_t001_inicial=(
+                    _int_sql(
+                        linha[
+                            "qtd_posicoes_t001"
+                        ]
+                    )
+                    or 0
+                ),
+                situacao_fisica_inicial=str(
+                    linha[
+                        "situacao_fisica"
+                    ]
+                ),
+                status_item=STATUS_ITEM_INICIAL,
+            )
+
+            inserir_historico_parametrizacao(
+                conn,
+                id_item_plano=id_item,
+                tipo_evento="ITEM_CRIADO",
+                usuario=criado_por,
+                origem="SISTEMA",
+                descricao=(
+                    "Item criado no plano de parametrização."
+                ),
+                status_anterior=None,
+                status_novo=STATUS_ITEM_INICIAL,
+                referencia_tipo="PLANO_PARAMETRIZACAO",
+                referencia_id=id_plano,
+            )
+
+            ids_itens.append(
+                id_item
+            )
+
+        conn.commit()
+
+    except Exception:
+        conn.rollback()
+        raise
+
+    return {
+        "id_plano": id_plano,
+        "status_plano": STATUS_PLANO_INICIAL,
+        "quantidade_materiais": (
+            quantidade_materiais
+        ),
+        "demanda_total_plano": (
+            demanda_total_plano
+        ),
+        "demanda_total_backlog_origem": float(
+            demanda_total_backlog_origem
+        ),
+        "percentual_real_cobertura": (
+            percentual_real_cobertura
+        ),
+        "ids_itens": ids_itens,
+    }

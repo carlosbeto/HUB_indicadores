@@ -11,6 +11,7 @@ from db.schema import criar_schema_plano_parametrizacao
 from services.plano_parametrizacao_service import (
     assumir_tarefa,
     criar_plano_parametrizacao,
+    liberar_tarefa,
 )
 
 
@@ -375,6 +376,226 @@ class TestWorkflowParametrizacaoService(unittest.TestCase):
 
         finally:
             conn_2.close()
+
+    def test_libera_tarefa_assumida_pelo_mesmo_controlador(
+        self,
+    ):
+        _, id_item = self._criar_plano(
+            ativar=True
+        )
+
+        assumir_tarefa(
+            self.conn,
+            id_item_plano=id_item,
+            controlador="CONTROLADOR_1",
+        )
+
+        resultado = liberar_tarefa(
+            self.conn,
+            id_item_plano=id_item,
+            controlador="CONTROLADOR_1",
+        )
+
+        self.assertEqual(
+            resultado["status_item"],
+            "DISPONIVEL",
+        )
+
+        self.assertIsNone(
+            resultado["controlador_responsavel"]
+        )
+
+        self.assertIsNone(
+            resultado["assumido_em"]
+        )
+
+        registro = self.conn.execute(
+            """
+            SELECT
+                status_item,
+                controlador_responsavel,
+                assumido_em
+            FROM plano_parametrizacao_item
+            WHERE id = ?
+            """,
+            (id_item,),
+        ).fetchone()
+
+        self.assertEqual(
+            registro,
+            (
+                "DISPONIVEL",
+                None,
+                None,
+            ),
+        )
+
+    def test_registra_historico_ao_liberar_tarefa(
+        self,
+    ):
+        _, id_item = self._criar_plano(
+            ativar=True
+        )
+
+        assumir_tarefa(
+            self.conn,
+            id_item_plano=id_item,
+            controlador="CONTROLADOR_1",
+        )
+
+        liberar_tarefa(
+            self.conn,
+            id_item_plano=id_item,
+            controlador="CONTROLADOR_1",
+        )
+
+        historico = self.conn.execute(
+            """
+            SELECT
+                tipo_evento,
+                status_anterior,
+                status_novo,
+                usuario,
+                origem
+            FROM parametrizacao_historico
+            WHERE
+                id_item_plano = ?
+                AND tipo_evento = 'TAREFA_LIBERADA'
+            """,
+            (id_item,),
+        ).fetchone()
+
+        self.assertEqual(
+            historico,
+            (
+                "TAREFA_LIBERADA",
+                "EM_ANALISE",
+                "DISPONIVEL",
+                "CONTROLADOR_1",
+                "USUARIO",
+            ),
+        )
+
+    def test_rejeita_liberacao_por_outro_controlador(
+        self,
+    ):
+        _, id_item = self._criar_plano(
+            ativar=True
+        )
+
+        assumir_tarefa(
+            self.conn,
+            id_item_plano=id_item,
+            controlador="CONTROLADOR_1",
+        )
+
+        with self.assertRaises(
+            ValueError
+        ):
+            liberar_tarefa(
+                self.conn,
+                id_item_plano=id_item,
+                controlador="CONTROLADOR_2",
+            )
+
+        registro = self.conn.execute(
+            """
+            SELECT
+                status_item,
+                controlador_responsavel
+            FROM plano_parametrizacao_item
+            WHERE id = ?
+            """,
+            (id_item,),
+        ).fetchone()
+
+        self.assertEqual(
+            registro,
+            (
+                "EM_ANALISE",
+                "CONTROLADOR_1",
+            ),
+        )
+
+    def test_rejeita_liberacao_de_tarefa_disponivel(
+        self,
+    ):
+        _, id_item = self._criar_plano(
+            ativar=True
+        )
+
+        with self.assertRaises(
+            ValueError
+        ):
+            liberar_tarefa(
+                self.conn,
+                id_item_plano=id_item,
+                controlador="CONTROLADOR_1",
+            )
+
+    def test_rejeita_liberacao_com_controlador_vazio(
+        self,
+    ):
+        _, id_item = self._criar_plano(
+            ativar=True
+        )
+
+        assumir_tarefa(
+            self.conn,
+            id_item_plano=id_item,
+            controlador="CONTROLADOR_1",
+        )
+
+        with self.assertRaises(
+            ValueError
+        ):
+            liberar_tarefa(
+                self.conn,
+                id_item_plano=id_item,
+                controlador="   ",
+            )
+
+    def test_libera_sem_alterar_prioridade_inicial(
+        self,
+    ):
+        _, id_item = self._criar_plano(
+            ativar=True
+        )
+
+        prioridade_antes = self.conn.execute(
+            """
+            SELECT prioridade_inicial
+            FROM plano_parametrizacao_item
+            WHERE id = ?
+            """,
+            (id_item,),
+        ).fetchone()[0]
+
+        assumir_tarefa(
+            self.conn,
+            id_item_plano=id_item,
+            controlador="CONTROLADOR_1",
+        )
+
+        liberar_tarefa(
+            self.conn,
+            id_item_plano=id_item,
+            controlador="CONTROLADOR_1",
+        )
+
+        prioridade_depois = self.conn.execute(
+            """
+            SELECT prioridade_inicial
+            FROM plano_parametrizacao_item
+            WHERE id = ?
+            """,
+            (id_item,),
+        ).fetchone()[0]
+
+        self.assertEqual(
+            prioridade_depois,
+            prioridade_antes,
+        )
 
 
 if __name__ == "__main__":

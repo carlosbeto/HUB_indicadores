@@ -358,3 +358,41 @@ def tentar_assumir_item_plano(
     )
 
     return cursor.rowcount == 1
+
+
+def tentar_liberar_item_plano(
+    conn: sqlite3.Connection,
+    *,
+    id_item_plano: int,
+    controlador: str,
+) -> bool:
+    """
+    Tenta liberar atomicamente uma tarefa em análise.
+
+    A liberação só ocorre quando:
+    - o item está EM_ANALISE;
+    - o controlador informado é o responsável atual.
+
+    Não executa commit.
+    """
+
+    cursor = conn.execute(
+        """
+        UPDATE plano_parametrizacao_item
+        SET
+            status_item = 'DISPONIVEL',
+            controlador_responsavel = NULL,
+            assumido_em = NULL,
+            atualizado_em = CURRENT_TIMESTAMP
+        WHERE
+            id = ?
+            AND status_item = 'EM_ANALISE'
+            AND controlador_responsavel = ?
+        """,
+        (
+            id_item_plano,
+            controlador,
+        ),
+    )
+
+    return cursor.rowcount == 1

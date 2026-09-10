@@ -11,6 +11,7 @@ from repositories.plano_parametrizacao_repository import (
     inserir_plano_parametrizacao,
     obter_item_plano_por_id,
     tentar_assumir_item_plano,
+    tentar_liberar_item_plano,
 )
 
 
@@ -531,6 +532,131 @@ def assumir_tarefa(
             referencia_tipo="ITEM_PLANO",
             referencia_id=id_item_plano,
             descricao="Tarefa assumida pelo controlador.",
+        )
+
+        conn.commit()
+
+    except Exception:
+        conn.rollback()
+        raise
+
+    registro = conn.execute(
+        """
+        SELECT
+            status_item,
+            controlador_responsavel,
+            assumido_em
+        FROM plano_parametrizacao_item
+        WHERE id = ?
+        """,
+        (id_item_plano,),
+    ).fetchone()
+
+    return {
+        "id_item_plano": id_item_plano,
+        "status_item": registro[0],
+        "controlador_responsavel": registro[1],
+        "assumido_em": registro[2],
+    }
+
+def liberar_tarefa(
+    conn: sqlite3.Connection,
+    *,
+    id_item_plano: int,
+    controlador: str,
+) -> dict:
+    """
+    Libera uma tarefa em análise e devolve o item à fila comum.
+
+    Somente o controlador responsável atual pode liberar a tarefa.
+    A operação é transacional.
+    """
+
+    controlador_normalizado = controlador.strip()
+
+    if not controlador_normalizado:
+        raise ValueError(
+            "O controlador é obrigatório."
+        )
+
+    try:
+        conn.execute(
+            "BEGIN IMMEDIATE"
+        )
+
+        item = obter_item_plano_por_id(
+            conn,
+            id_item_plano,
+        )
+
+        if item is None:
+            raise ValueError(
+                "Item do plano não encontrado."
+            )
+
+        colunas = [
+            descricao[0]
+            for descricao in conn.execute(
+                """
+                SELECT
+                    i.*,
+                    p.status_plano
+                FROM plano_parametrizacao_item i
+                INNER JOIN plano_parametrizacao p
+                    ON p.id = i.id_plano
+                WHERE i.id = ?
+                """,
+                (id_item_plano,),
+            ).description
+        ]
+
+        dados_item = dict(
+            zip(
+                colunas,
+                item,
+            )
+        )
+
+        if dados_item["status_plano"] != "ATIVO":
+            raise ValueError(
+                "A tarefa pertence a um plano que não está ativo."
+            )
+
+        if dados_item["status_item"] != "EM_ANALISE":
+            raise ValueError(
+                "A tarefa não está em análise."
+            )
+
+        if (
+            dados_item["controlador_responsavel"]
+            != controlador_normalizado
+        ):
+            raise ValueError(
+                "A tarefa pertence a outro controlador."
+            )
+
+        liberou = tentar_liberar_item_plano(
+            conn,
+            id_item_plano=id_item_plano,
+            controlador=controlador_normalizado,
+        )
+
+        if not liberou:
+            raise ValueError(
+                "A tarefa não pôde ser liberada."
+            )
+
+        inserir_historico_parametrizacao(
+            conn,
+            id_item_plano=id_item_plano,
+            tipo_evento="TAREFA_LIBERADA",
+            usuario=controlador_normalizado,
+            origem="USUARIO",
+            status_anterior="EM_ANALISE",
+            status_novo="DISPONIVEL",
+            referencia_tipo="ITEM_PLANO",
+            referencia_id=id_item_plano,
+            descricao="Tarefa liberada pelo controlador.",
         )
 
         conn.commit()

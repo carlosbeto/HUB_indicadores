@@ -38,3 +38,9 @@ code/analiseInventarios/outputs/
 
 # Resíduos do Windows
 Thumbs.db
+
+# Dados operacionais - Ressuprimento
+code/analiseRessuprimento/data_db/
+code/analiseRessuprimento/INPUT/
+code/analiseRessuprimento/logs/
+code/analiseRessuprimento/OUTPUT/

@@ -301,3 +301,60 @@ def listar_itens_plano(
         """,
         (id_plano,),
     ).fetchall()
+
+
+def obter_item_plano_por_id(
+    conn: sqlite3.Connection,
+    id_item_plano: int,
+) -> sqlite3.Row | tuple | None:
+    """
+    Retorna um item do plano junto com o status do plano pai.
+    """
+
+    return conn.execute(
+        """
+        SELECT
+            i.*,
+            p.status_plano
+        FROM plano_parametrizacao_item i
+        INNER JOIN plano_parametrizacao p
+            ON p.id = i.id_plano
+        WHERE i.id = ?
+        """,
+        (id_item_plano,),
+    ).fetchone()
+
+
+def tentar_assumir_item_plano(
+    conn: sqlite3.Connection,
+    *,
+    id_item_plano: int,
+    controlador: str,
+) -> bool:
+    """
+    Tenta assumir atomicamente um item disponível.
+
+    Retorna True somente se exatamente um registro for alterado.
+    Não executa commit.
+    """
+
+    cursor = conn.execute(
+        """
+        UPDATE plano_parametrizacao_item
+        SET
+            status_item = 'EM_ANALISE',
+            controlador_responsavel = ?,
+            assumido_em = CURRENT_TIMESTAMP,
+            atualizado_em = CURRENT_TIMESTAMP
+        WHERE
+            id = ?
+            AND status_item = 'DISPONIVEL'
+            AND controlador_responsavel IS NULL
+        """,
+        (
+            controlador,
+            id_item_plano,
+        ),
+    )
+
+    return cursor.rowcount == 1

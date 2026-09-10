@@ -6,6 +6,8 @@ import sqlite3
 import pandas as pd
 
 from repositories.plano_parametrizacao_repository import (
+    atualizar_status_item_apos_decisao,
+    inserir_decisao_parametrizacao,
     inserir_historico_parametrizacao,
     inserir_item_plano_parametrizacao,
     inserir_plano_parametrizacao,
@@ -682,4 +684,244 @@ def liberar_tarefa(
         "status_item": registro[0],
         "controlador_responsavel": registro[1],
         "assumido_em": registro[2],
+    }
+
+def registrar_decisao(
+    conn: sqlite3.Connection,
+    *,
+    id_item_plano: int,
+    controlador: str,
+    decisao: str,
+    min_proposto: float | None = None,
+    max_proposto: float | None = None,
+    justificativa: str | None = None,
+    observacao: str | None = None,
+) -> dict:
+    """
+    Registra a primeira decisão operacional de um item em análise.
+
+    O item deve pertencer a um plano ativo e estar sob
+    responsabilidade do controlador informado.
+    """
+
+    controlador_normalizado = controlador.strip()
+
+    if not controlador_normalizado:
+        raise ValueError(
+            "O controlador é obrigatório."
+        )
+
+    decisao_normalizada = decisao.strip().upper()
+
+    decisoes_validas = {
+        "PARAMETRIZAR",
+        "NAO_PARAMETRIZAR",
+        "INVESTIGAR",
+        "REVISAR_POSTERIORMENTE",
+    }
+
+    if decisao_normalizada not in decisoes_validas:
+        raise ValueError(
+            "Decisão de parametrização inválida."
+        )
+
+    justificativa_normalizada = (
+        justificativa.strip()
+        if justificativa is not None
+        else None
+    )
+
+    observacao_normalizada = (
+        observacao.strip()
+        if observacao is not None
+        else None
+    )
+
+    if decisao_normalizada == "PARAMETRIZAR":
+        if min_proposto is None or max_proposto is None:
+            raise ValueError(
+                "MIN e MAX propostos são obrigatórios "
+                "para parametrização."
+            )
+
+        min_normalizado = float(min_proposto)
+        max_normalizado = float(max_proposto)
+
+        if (
+            not math.isfinite(min_normalizado)
+            or not math.isfinite(max_normalizado)
+        ):
+            raise ValueError(
+                "MIN e MAX propostos devem ser valores finitos."
+            )
+
+        if min_normalizado < 0:
+            raise ValueError(
+                "O MIN proposto não pode ser negativo."
+            )
+
+        if max_normalizado < min_normalizado:
+            raise ValueError(
+                "O MAX proposto não pode ser menor que o MIN."
+            )
+
+        status_novo = "AGUARDANDO_CONFIRMACAO_SAP"
+
+    else:
+        if not justificativa_normalizada:
+            raise ValueError(
+                "A justificativa é obrigatória para esta decisão."
+            )
+
+        if min_proposto is not None or max_proposto is not None:
+            raise ValueError(
+                "MIN e MAX não devem ser informados "
+                "para esta decisão."
+            )
+
+        min_normalizado = None
+        max_normalizado = None
+
+        if decisao_normalizada == "NAO_PARAMETRIZAR":
+            status_novo = "ENCERRADO_SEM_PARAMETRIZACAO"
+        else:
+            status_novo = "EM_ANALISE"
+
+    try:
+        conn.execute(
+            "BEGIN IMMEDIATE"
+        )
+
+        item = obter_item_plano_por_id(
+            conn,
+            id_item_plano,
+        )
+
+        if item is None:
+            raise ValueError(
+                "Item do plano não encontrado."
+            )
+
+        cursor_item = conn.execute(
+            """
+            SELECT
+                i.*,
+                p.status_plano
+            FROM plano_parametrizacao_item i
+            INNER JOIN plano_parametrizacao p
+                ON p.id = i.id_plano
+            WHERE i.id = ?
+            """,
+            (id_item_plano,),
+        )
+
+        colunas = [
+            descricao[0]
+            for descricao in cursor_item.description
+        ]
+
+        dados_item = dict(
+            zip(
+                colunas,
+                item,
+            )
+        )
+
+        if dados_item["status_plano"] != "ATIVO":
+            raise ValueError(
+                "A tarefa pertence a um plano que não está ativo."
+            )
+
+        if dados_item["status_item"] != "EM_ANALISE":
+            raise ValueError(
+                "A tarefa não está em análise."
+            )
+
+        if (
+            dados_item["controlador_responsavel"]
+            != controlador_normalizado
+        ):
+            raise ValueError(
+                "A tarefa pertence a outro controlador."
+            )
+
+        decisao_ativa = conn.execute(
+            """
+            SELECT id
+            FROM parametrizacao_decisao
+            WHERE
+                id_item_plano = ?
+                AND ativo = 1
+            """,
+            (id_item_plano,),
+        ).fetchone()
+
+        if decisao_ativa is not None:
+            raise ValueError(
+                "O item já possui uma decisão ativa."
+            )
+
+        id_decisao = inserir_decisao_parametrizacao(
+            conn,
+            id_item_plano=id_item_plano,
+            numero_revisao=1,
+            decisao=decisao_normalizada,
+            controlador=controlador_normalizado,
+            min_proposto=min_normalizado,
+            max_proposto=max_normalizado,
+            justificativa=justificativa_normalizada,
+            observacao=observacao_normalizada,
+        )
+
+        atualizou = atualizar_status_item_apos_decisao(
+            conn,
+            id_item_plano=id_item_plano,
+            controlador=controlador_normalizado,
+            status_novo=status_novo,
+        )
+
+        if not atualizou:
+            raise ValueError(
+                "O status da tarefa não pôde ser atualizado."
+            )
+
+        inserir_historico_parametrizacao(
+            conn,
+            id_item_plano=id_item_plano,
+            tipo_evento="DECISAO_REGISTRADA",
+            usuario=controlador_normalizado,
+            origem="USUARIO",
+            status_anterior="EM_ANALISE",
+            status_novo=status_novo,
+            referencia_tipo="DECISAO",
+            referencia_id=id_decisao,
+            descricao=(
+                f"Decisão registrada: {decisao_normalizada}."
+            ),
+        )
+
+        conn.commit()
+
+    except Exception:
+        conn.rollback()
+        raise
+
+    registro = conn.execute(
+        """
+        SELECT
+            status_item,
+            controlador_responsavel
+        FROM plano_parametrizacao_item
+        WHERE id = ?
+        """,
+        (id_item_plano,),
+    ).fetchone()
+
+    return {
+        "id_item_plano": id_item_plano,
+        "id_decisao": id_decisao,
+        "numero_revisao": 1,
+        "decisao": decisao_normalizada,
+        "status_item": registro[0],
+        "controlador_responsavel": registro[1],
     }

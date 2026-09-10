@@ -396,3 +396,85 @@ def tentar_liberar_item_plano(
     )
 
     return cursor.rowcount == 1
+
+def inserir_decisao_parametrizacao(
+    conn: sqlite3.Connection,
+    *,
+    id_item_plano: int,
+    numero_revisao: int,
+    decisao: str,
+    controlador: str,
+    min_proposto: float | None = None,
+    max_proposto: float | None = None,
+    justificativa: str | None = None,
+    observacao: str | None = None,
+) -> int:
+    """
+    Registra uma decisão de parametrização para o item.
+
+    A transação é responsabilidade do service chamador.
+    """
+
+    cursor = conn.execute(
+        """
+        INSERT INTO parametrizacao_decisao (
+            id_item_plano,
+            numero_revisao,
+            decisao,
+            min_proposto,
+            max_proposto,
+            justificativa,
+            observacao,
+            controlador,
+            ativo
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
+        """,
+        (
+            id_item_plano,
+            numero_revisao,
+            decisao,
+            min_proposto,
+            max_proposto,
+            justificativa,
+            observacao,
+            controlador,
+        ),
+    )
+
+    return int(cursor.lastrowid)
+
+
+def atualizar_status_item_apos_decisao(
+    conn: sqlite3.Connection,
+    *,
+    id_item_plano: int,
+    controlador: str,
+    status_novo: str,
+) -> bool:
+    """
+    Atualiza atomicamente o status de um item em análise.
+
+    Somente o controlador responsável atual pode alterar o item.
+    A transação é responsabilidade do service chamador.
+    """
+
+    cursor = conn.execute(
+        """
+        UPDATE plano_parametrizacao_item
+        SET
+            status_item = ?,
+            atualizado_em = CURRENT_TIMESTAMP
+        WHERE
+            id = ?
+            AND status_item = 'EM_ANALISE'
+            AND controlador_responsavel = ?
+        """,
+        (
+            status_novo,
+            id_item_plano,
+            controlador,
+        ),
+    )
+
+    return cursor.rowcount == 1

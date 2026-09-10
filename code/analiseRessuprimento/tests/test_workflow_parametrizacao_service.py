@@ -12,6 +12,7 @@ from services.plano_parametrizacao_service import (
     assumir_tarefa,
     criar_plano_parametrizacao,
     liberar_tarefa,
+    registrar_decisao,
 )
 
 
@@ -597,6 +598,391 @@ class TestWorkflowParametrizacaoService(unittest.TestCase):
             prioridade_antes,
         )
 
+
+    def test_parametrizar_avanca_para_aguardando_confirmacao_sap(
+        self,
+    ):
+        _, id_item = self._criar_plano(
+            ativar=True
+        )
+
+        assumir_tarefa(
+            self.conn,
+            id_item_plano=id_item,
+            controlador="CONTROLADOR_1",
+        )
+
+        resultado = registrar_decisao(
+            self.conn,
+            id_item_plano=id_item,
+            controlador="CONTROLADOR_1",
+            decisao="PARAMETRIZAR",
+            min_proposto=10.0,
+            max_proposto=50.0,
+        )
+
+        self.assertEqual(
+            resultado["status_item"],
+            "AGUARDANDO_CONFIRMACAO_SAP",
+        )
+
+        decisao = self.conn.execute(
+            """
+            SELECT
+                numero_revisao,
+                decisao,
+                min_proposto,
+                max_proposto,
+                controlador,
+                ativo
+            FROM parametrizacao_decisao
+            WHERE id_item_plano = ?
+            """,
+            (id_item,),
+        ).fetchone()
+
+        self.assertEqual(
+            decisao,
+            (
+                1,
+                "PARAMETRIZAR",
+                10.0,
+                50.0,
+                "CONTROLADOR_1",
+                1,
+            ),
+        )
+
+    def test_rejeita_parametrizar_sem_minimo(
+        self,
+    ):
+        _, id_item = self._criar_plano(
+            ativar=True
+        )
+
+        assumir_tarefa(
+            self.conn,
+            id_item_plano=id_item,
+            controlador="CONTROLADOR_1",
+        )
+
+        with self.assertRaises(ValueError):
+            registrar_decisao(
+                self.conn,
+                id_item_plano=id_item,
+                controlador="CONTROLADOR_1",
+                decisao="PARAMETRIZAR",
+                max_proposto=50.0,
+            )
+
+    def test_rejeita_parametrizar_sem_maximo(
+        self,
+    ):
+        _, id_item = self._criar_plano(
+            ativar=True
+        )
+
+        assumir_tarefa(
+            self.conn,
+            id_item_plano=id_item,
+            controlador="CONTROLADOR_1",
+        )
+
+        with self.assertRaises(ValueError):
+            registrar_decisao(
+                self.conn,
+                id_item_plano=id_item,
+                controlador="CONTROLADOR_1",
+                decisao="PARAMETRIZAR",
+                min_proposto=10.0,
+            )
+
+    def test_rejeita_parametrizar_com_minimo_negativo(
+        self,
+    ):
+        _, id_item = self._criar_plano(
+            ativar=True
+        )
+
+        assumir_tarefa(
+            self.conn,
+            id_item_plano=id_item,
+            controlador="CONTROLADOR_1",
+        )
+
+        with self.assertRaises(ValueError):
+            registrar_decisao(
+                self.conn,
+                id_item_plano=id_item,
+                controlador="CONTROLADOR_1",
+                decisao="PARAMETRIZAR",
+                min_proposto=-1.0,
+                max_proposto=50.0,
+            )
+
+    def test_rejeita_parametrizar_com_maximo_menor_que_minimo(
+        self,
+    ):
+        _, id_item = self._criar_plano(
+            ativar=True
+        )
+
+        assumir_tarefa(
+            self.conn,
+            id_item_plano=id_item,
+            controlador="CONTROLADOR_1",
+        )
+
+        with self.assertRaises(ValueError):
+            registrar_decisao(
+                self.conn,
+                id_item_plano=id_item,
+                controlador="CONTROLADOR_1",
+                decisao="PARAMETRIZAR",
+                min_proposto=50.0,
+                max_proposto=10.0,
+            )
+
+    def test_nao_parametrizar_encerra_item(
+        self,
+    ):
+        _, id_item = self._criar_plano(
+            ativar=True
+        )
+
+        assumir_tarefa(
+            self.conn,
+            id_item_plano=id_item,
+            controlador="CONTROLADOR_1",
+        )
+
+        resultado = registrar_decisao(
+            self.conn,
+            id_item_plano=id_item,
+            controlador="CONTROLADOR_1",
+            decisao="NAO_PARAMETRIZAR",
+            justificativa="Material não deve ser parametrizado.",
+        )
+
+        self.assertEqual(
+            resultado["status_item"],
+            "ENCERRADO_SEM_PARAMETRIZACAO",
+        )
+
+    def test_investigar_mantem_item_em_analise(
+        self,
+    ):
+        _, id_item = self._criar_plano(
+            ativar=True
+        )
+
+        assumir_tarefa(
+            self.conn,
+            id_item_plano=id_item,
+            controlador="CONTROLADOR_1",
+        )
+
+        resultado = registrar_decisao(
+            self.conn,
+            id_item_plano=id_item,
+            controlador="CONTROLADOR_1",
+            decisao="INVESTIGAR",
+            justificativa="Necessário validar situação física.",
+        )
+
+        self.assertEqual(
+            resultado["status_item"],
+            "EM_ANALISE",
+        )
+        self.assertEqual(
+            resultado["controlador_responsavel"],
+            "CONTROLADOR_1",
+        )
+
+    def test_revisar_posteriormente_mantem_item_em_analise(
+        self,
+    ):
+        _, id_item = self._criar_plano(
+            ativar=True
+        )
+
+        assumir_tarefa(
+            self.conn,
+            id_item_plano=id_item,
+            controlador="CONTROLADOR_1",
+        )
+
+        resultado = registrar_decisao(
+            self.conn,
+            id_item_plano=id_item,
+            controlador="CONTROLADOR_1",
+            decisao="REVISAR_POSTERIORMENTE",
+            justificativa="Reavaliar após nova informação.",
+        )
+
+        self.assertEqual(
+            resultado["status_item"],
+            "EM_ANALISE",
+        )
+        self.assertEqual(
+            resultado["controlador_responsavel"],
+            "CONTROLADOR_1",
+        )
+
+    def test_rejeita_decisoes_nao_parametrizadoras_sem_justificativa(
+        self,
+    ):
+        for decisao in (
+            "NAO_PARAMETRIZAR",
+            "INVESTIGAR",
+            "REVISAR_POSTERIORMENTE",
+        ):
+            with self.subTest(decisao=decisao):
+                _, id_item = self._criar_plano(
+                    ativar=True
+                )
+
+                assumir_tarefa(
+                    self.conn,
+                    id_item_plano=id_item,
+                    controlador="CONTROLADOR_1",
+                )
+
+                with self.assertRaises(ValueError):
+                    registrar_decisao(
+                        self.conn,
+                        id_item_plano=id_item,
+                        controlador="CONTROLADOR_1",
+                        decisao=decisao,
+                        justificativa="   ",
+                    )
+
+    def test_rejeita_min_max_em_decisao_nao_parametrizadora(
+        self,
+    ):
+        _, id_item = self._criar_plano(
+            ativar=True
+        )
+
+        assumir_tarefa(
+            self.conn,
+            id_item_plano=id_item,
+            controlador="CONTROLADOR_1",
+        )
+
+        with self.assertRaises(ValueError):
+            registrar_decisao(
+                self.conn,
+                id_item_plano=id_item,
+                controlador="CONTROLADOR_1",
+                decisao="INVESTIGAR",
+                justificativa="Necessário investigar.",
+                min_proposto=10.0,
+                max_proposto=50.0,
+            )
+
+    def test_rejeita_decisao_por_outro_controlador(
+        self,
+    ):
+        _, id_item = self._criar_plano(
+            ativar=True
+        )
+
+        assumir_tarefa(
+            self.conn,
+            id_item_plano=id_item,
+            controlador="CONTROLADOR_1",
+        )
+
+        with self.assertRaises(ValueError):
+            registrar_decisao(
+                self.conn,
+                id_item_plano=id_item,
+                controlador="CONTROLADOR_2",
+                decisao="INVESTIGAR",
+                justificativa="Teste.",
+            )
+
+    def test_rejeita_decisao_em_plano_nao_ativo(
+        self,
+    ):
+        id_plano, id_item = self._criar_plano(
+            ativar=True
+        )
+
+        assumir_tarefa(
+            self.conn,
+            id_item_plano=id_item,
+            controlador="CONTROLADOR_1",
+        )
+
+        self.conn.execute(
+            """
+            UPDATE plano_parametrizacao
+            SET status_plano = 'RASCUNHO'
+            WHERE id = ?
+            """,
+            (id_plano,),
+        )
+        self.conn.commit()
+
+        with self.assertRaises(ValueError):
+            registrar_decisao(
+                self.conn,
+                id_item_plano=id_item,
+                controlador="CONTROLADOR_1",
+                decisao="INVESTIGAR",
+                justificativa="Teste.",
+            )
+
+    def test_registra_historico_da_decisao(
+        self,
+    ):
+        _, id_item = self._criar_plano(
+            ativar=True
+        )
+
+        assumir_tarefa(
+            self.conn,
+            id_item_plano=id_item,
+            controlador="CONTROLADOR_1",
+        )
+
+        registrar_decisao(
+            self.conn,
+            id_item_plano=id_item,
+            controlador="CONTROLADOR_1",
+            decisao="PARAMETRIZAR",
+            min_proposto=10.0,
+            max_proposto=50.0,
+        )
+
+        historico = self.conn.execute(
+            """
+            SELECT
+                tipo_evento,
+                status_anterior,
+                status_novo,
+                usuario,
+                origem
+            FROM parametrizacao_historico
+            WHERE
+                id_item_plano = ?
+                AND tipo_evento = 'DECISAO_REGISTRADA'
+            """,
+            (id_item,),
+        ).fetchone()
+
+        self.assertEqual(
+            historico,
+            (
+                "DECISAO_REGISTRADA",
+                "EM_ANALISE",
+                "AGUARDANDO_CONFIRMACAO_SAP",
+                "CONTROLADOR_1",
+                "USUARIO",
+            ),
+        )
 
 if __name__ == "__main__":
     unittest.main()

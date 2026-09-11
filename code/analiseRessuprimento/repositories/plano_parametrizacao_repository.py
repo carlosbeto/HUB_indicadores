@@ -539,3 +539,108 @@ def inativar_decisao_ativa_item(
     )
 
     return cursor.rowcount == 1
+
+
+def obter_posicao_binmat_atual(
+    conn: sqlite3.Connection,
+    *,
+    material: str,
+    posicao: str,
+) -> tuple | None:
+    """
+    Retorna o MIN/MAX atual da posição no BINMAT.
+    """
+
+    return conn.execute(
+        """
+        SELECT
+            quantidade_minima,
+            quantidade_maxima,
+            arquivo_origem
+        FROM dim_posicao_material
+        WHERE
+            material = ?
+            AND posicao = ?
+        """,
+        (
+            material,
+            posicao,
+        ),
+    ).fetchone()
+
+
+def inserir_confirmacao_parametrizacao(
+    conn: sqlite3.Connection,
+    *,
+    id_decisao: int,
+    resultado: str,
+    min_encontrado: float | None = None,
+    max_encontrado: float | None = None,
+    arquivo_binmat: str | None = None,
+    hash_binmat: str | None = None,
+    observacao: str | None = None,
+) -> int:
+    """
+    Registra uma verificação da parametrização no BINMAT.
+
+    Uma mesma decisão pode possuir várias verificações ao longo
+    do tempo. A transação é responsabilidade do service.
+    """
+
+    cursor = conn.execute(
+        """
+        INSERT INTO parametrizacao_confirmacao (
+            id_decisao,
+            min_encontrado,
+            max_encontrado,
+            resultado,
+            arquivo_binmat,
+            hash_binmat,
+            observacao
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            id_decisao,
+            min_encontrado,
+            max_encontrado,
+            resultado,
+            arquivo_binmat,
+            hash_binmat,
+            observacao,
+        ),
+    )
+
+    return int(cursor.lastrowid)
+
+
+def atualizar_status_item_confirmacao_sap(
+    conn: sqlite3.Connection,
+    *,
+    id_item_plano: int,
+    status_novo: str,
+) -> bool:
+    """
+    Atualiza o status do item durante a verificação SAP.
+
+    A operação só é permitida enquanto o item estiver aguardando
+    confirmação SAP.
+    """
+
+    cursor = conn.execute(
+        """
+        UPDATE plano_parametrizacao_item
+        SET
+            status_item = ?,
+            atualizado_em = CURRENT_TIMESTAMP
+        WHERE
+            id = ?
+            AND status_item = 'AGUARDANDO_CONFIRMACAO_SAP'
+        """,
+        (
+            status_novo,
+            id_item_plano,
+        ),
+    )
+
+    return cursor.rowcount == 1

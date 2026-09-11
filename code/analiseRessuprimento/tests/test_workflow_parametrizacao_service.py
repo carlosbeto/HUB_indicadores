@@ -14,6 +14,7 @@ from services.plano_parametrizacao_service import (
     liberar_tarefa,
     registrar_decisao,
     revisar_decisao,
+    confirmar_parametrizacao_sap,
 )
 
 
@@ -50,6 +51,26 @@ class TestWorkflowParametrizacaoService(unittest.TestCase):
                 material TEXT PRIMARY KEY,
                 descricao_material TEXT,
                 criado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                atualizado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+
+        self.conn.execute(
+            """
+            CREATE TABLE dim_posicao_material (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                material TEXT NOT NULL,
+                deposito TEXT NOT NULL,
+                tipo_deposito TEXT NOT NULL,
+                posicao TEXT NOT NULL,
+                quantidade_minima REAL,
+                quantidade_maxima REAL,
+                unidade_medida TEXT,
+                data_modificacao TEXT,
+                momento_criacao TEXT,
+                autor TEXT,
+                arquivo_origem TEXT,
                 atualizado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
             """
@@ -1384,6 +1405,453 @@ class TestWorkflowParametrizacaoService(unittest.TestCase):
                 min_proposto=10.0,
                 max_proposto=50.0,
             )
+
+    def _preparar_item_para_confirmacao(
+        self,
+        *,
+        min_inicial=0.0,
+        max_inicial=0.0,
+        min_proposto=10.0,
+        max_proposto=50.0,
+    ):
+        id_plano, id_item = self._criar_plano(
+            ativar=True
+        )
+
+        self.conn.execute(
+            """
+            UPDATE plano_parametrizacao_item
+            SET
+                min_inicial = ?,
+                max_inicial = ?
+            WHERE id = ?
+            """,
+            (
+                min_inicial,
+                max_inicial,
+                id_item,
+            ),
+        )
+        self.conn.commit()
+
+        assumir_tarefa(
+            self.conn,
+            id_item_plano=id_item,
+            controlador="CONTROLADOR_1",
+        )
+
+        decisao = registrar_decisao(
+            self.conn,
+            id_item_plano=id_item,
+            controlador="CONTROLADOR_1",
+            decisao="PARAMETRIZAR",
+            min_proposto=min_proposto,
+            max_proposto=max_proposto,
+        )
+
+        item = self.conn.execute(
+            """
+            SELECT
+                material,
+                posicao_pt02
+            FROM plano_parametrizacao_item
+            WHERE id = ?
+            """,
+            (id_item,),
+        ).fetchone()
+
+        return {
+            "id_plano": id_plano,
+            "id_item": id_item,
+            "id_decisao": decisao["id_decisao"],
+            "material": item[0],
+            "posicao": item[1],
+        }
+
+    def _definir_binmat_atual(
+        self,
+        *,
+        material,
+        posicao,
+        min_atual,
+        max_atual,
+    ):
+        existente = self.conn.execute(
+            """
+            SELECT id
+            FROM dim_posicao_material
+            WHERE
+                material = ?
+                AND posicao = ?
+            """,
+            (
+                material,
+                posicao,
+            ),
+        ).fetchone()
+
+        if existente is None:
+            self.conn.execute(
+                """
+                INSERT INTO dim_posicao_material (
+                    material,
+                    deposito,
+                    tipo_deposito,
+                    posicao,
+                    quantidade_minima,
+                    quantidade_maxima
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    material,
+                    "1002",
+                    "PT02",
+                    posicao,
+                    min_atual,
+                    max_atual,
+                ),
+            )
+        else:
+            self.conn.execute(
+                """
+                UPDATE dim_posicao_material
+                SET
+                    quantidade_minima = ?,
+                    quantidade_maxima = ?
+                WHERE id = ?
+                """,
+                (
+                    min_atual,
+                    max_atual,
+                    existente[0],
+                ),
+            )
+
+        self.conn.commit()
+
+    def test_confirmacao_sap_confirmada_quando_binmat_iguala_proposta(
+        self,
+    ):
+        dados = self._preparar_item_para_confirmacao()
+
+        self._definir_binmat_atual(
+            material=dados["material"],
+            posicao=dados["posicao"],
+            min_atual=10.0,
+            max_atual=50.0,
+        )
+
+        resultado = confirmar_parametrizacao_sap(
+            self.conn,
+            id_item_plano=dados["id_item"],
+            arquivo_binmat="BINMAT_TESTE.xlsx",
+            hash_binmat="HASH_TESTE",
+        )
+
+        self.assertEqual(
+            resultado["resultado"],
+            "CONFIRMADO",
+        )
+        self.assertEqual(
+            resultado["status_item"],
+            "CONFIRMADO_SAP",
+        )
+        self.assertEqual(
+            resultado["min_encontrado"],
+            10.0,
+        )
+        self.assertEqual(
+            resultado["max_encontrado"],
+            50.0,
+        )
+
+    def test_confirmacao_sap_ainda_nao_refletida_quando_binmat_igual_snapshot(
+        self,
+    ):
+        dados = self._preparar_item_para_confirmacao(
+            min_inicial=0.0,
+            max_inicial=0.0,
+            min_proposto=10.0,
+            max_proposto=50.0,
+        )
+
+        self._definir_binmat_atual(
+            material=dados["material"],
+            posicao=dados["posicao"],
+            min_atual=0.0,
+            max_atual=0.0,
+        )
+
+        resultado = confirmar_parametrizacao_sap(
+            self.conn,
+            id_item_plano=dados["id_item"],
+            arquivo_binmat="BINMAT_TESTE.xlsx",
+            hash_binmat="HASH_TESTE",
+        )
+
+        self.assertEqual(
+            resultado["resultado"],
+            "AINDA_NAO_REFLETIDO",
+        )
+        self.assertEqual(
+            resultado["status_item"],
+            "AGUARDANDO_CONFIRMACAO_SAP",
+        )
+
+    def test_confirmacao_sap_divergente_quando_binmat_mudou_mas_nao_bate_proposta(
+        self,
+    ):
+        dados = self._preparar_item_para_confirmacao(
+            min_inicial=0.0,
+            max_inicial=0.0,
+            min_proposto=10.0,
+            max_proposto=50.0,
+        )
+
+        self._definir_binmat_atual(
+            material=dados["material"],
+            posicao=dados["posicao"],
+            min_atual=10.0,
+            max_atual=60.0,
+        )
+
+        resultado = confirmar_parametrizacao_sap(
+            self.conn,
+            id_item_plano=dados["id_item"],
+            arquivo_binmat="BINMAT_TESTE.xlsx",
+            hash_binmat="HASH_TESTE",
+        )
+
+        self.assertEqual(
+            resultado["resultado"],
+            "DIVERGENTE",
+        )
+        self.assertEqual(
+            resultado["status_item"],
+            "DIVERGENCIA_SAP",
+        )
+        self.assertEqual(
+            resultado["min_encontrado"],
+            10.0,
+        )
+        self.assertEqual(
+            resultado["max_encontrado"],
+            60.0,
+        )
+
+    def test_confirmacao_sap_posicao_nao_encontrada(
+        self,
+    ):
+        dados = self._preparar_item_para_confirmacao()
+
+        self.conn.execute(
+            """
+            DELETE FROM dim_posicao_material
+            WHERE
+                material = ?
+                AND posicao = ?
+            """,
+            (
+                dados["material"],
+                dados["posicao"],
+            ),
+        )
+        self.conn.commit()
+
+        resultado = confirmar_parametrizacao_sap(
+            self.conn,
+            id_item_plano=dados["id_item"],
+            arquivo_binmat="BINMAT_TESTE.xlsx",
+            hash_binmat="HASH_TESTE",
+        )
+
+        self.assertEqual(
+            resultado["resultado"],
+            "POSICAO_NAO_ENCONTRADA",
+        )
+        self.assertEqual(
+            resultado["status_item"],
+            "AGUARDANDO_CONFIRMACAO_SAP",
+        )
+        self.assertIsNone(
+            resultado["min_encontrado"]
+        )
+        self.assertIsNone(
+            resultado["max_encontrado"]
+        )
+
+    def test_confirmacao_sap_persiste_registro_de_confirmacao(
+        self,
+    ):
+        dados = self._preparar_item_para_confirmacao()
+
+        self._definir_binmat_atual(
+            material=dados["material"],
+            posicao=dados["posicao"],
+            min_atual=10.0,
+            max_atual=50.0,
+        )
+
+        confirmar_parametrizacao_sap(
+            self.conn,
+            id_item_plano=dados["id_item"],
+            arquivo_binmat="BINMAT_TESTE.xlsx",
+            hash_binmat="HASH_TESTE",
+        )
+
+        confirmacao = self.conn.execute(
+            """
+            SELECT
+                id_decisao,
+                min_encontrado,
+                max_encontrado,
+                resultado,
+                arquivo_binmat,
+                hash_binmat
+            FROM parametrizacao_confirmacao
+            WHERE id_decisao = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (dados["id_decisao"],),
+        ).fetchone()
+
+        self.assertEqual(
+            confirmacao,
+            (
+                dados["id_decisao"],
+                10.0,
+                50.0,
+                "CONFIRMADO",
+                "BINMAT_TESTE.xlsx",
+                "HASH_TESTE",
+            ),
+        )
+
+    def test_confirmacao_sap_preserva_multiplas_verificacoes(
+        self,
+    ):
+        dados = self._preparar_item_para_confirmacao()
+
+        self._definir_binmat_atual(
+            material=dados["material"],
+            posicao=dados["posicao"],
+            min_atual=0.0,
+            max_atual=0.0,
+        )
+
+        primeira = confirmar_parametrizacao_sap(
+            self.conn,
+            id_item_plano=dados["id_item"],
+            arquivo_binmat="BINMAT_1.xlsx",
+            hash_binmat="HASH_1",
+        )
+
+        self.assertEqual(
+            primeira["resultado"],
+            "AINDA_NAO_REFLETIDO",
+        )
+
+        self._definir_binmat_atual(
+            material=dados["material"],
+            posicao=dados["posicao"],
+            min_atual=10.0,
+            max_atual=50.0,
+        )
+
+        segunda = confirmar_parametrizacao_sap(
+            self.conn,
+            id_item_plano=dados["id_item"],
+            arquivo_binmat="BINMAT_2.xlsx",
+            hash_binmat="HASH_2",
+        )
+
+        self.assertEqual(
+            segunda["resultado"],
+            "CONFIRMADO",
+        )
+
+        quantidade = self.conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM parametrizacao_confirmacao
+            WHERE id_decisao = ?
+            """,
+            (dados["id_decisao"],),
+        ).fetchone()[0]
+
+        self.assertEqual(
+            quantidade,
+            2,
+        )
+
+    def test_confirmacao_sap_rejeita_item_fora_de_aguardando_confirmacao(
+        self,
+    ):
+        _, id_item = self._criar_plano(
+            ativar=True
+        )
+
+        assumir_tarefa(
+            self.conn,
+            id_item_plano=id_item,
+            controlador="CONTROLADOR_1",
+        )
+
+        with self.assertRaises(ValueError):
+            confirmar_parametrizacao_sap(
+                self.conn,
+                id_item_plano=id_item,
+                arquivo_binmat="BINMAT_TESTE.xlsx",
+                hash_binmat="HASH_TESTE",
+            )
+
+    def test_confirmacao_sap_registra_historico(
+        self,
+    ):
+        dados = self._preparar_item_para_confirmacao()
+
+        self._definir_binmat_atual(
+            material=dados["material"],
+            posicao=dados["posicao"],
+            min_atual=10.0,
+            max_atual=50.0,
+        )
+
+        confirmar_parametrizacao_sap(
+            self.conn,
+            id_item_plano=dados["id_item"],
+            arquivo_binmat="BINMAT_TESTE.xlsx",
+            hash_binmat="HASH_TESTE",
+        )
+
+        historico = self.conn.execute(
+            """
+            SELECT
+                tipo_evento,
+                status_anterior,
+                status_novo,
+                origem
+            FROM parametrizacao_historico
+            WHERE
+                id_item_plano = ?
+                AND tipo_evento = 'CONFIRMACAO_SAP'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (dados["id_item"],),
+        ).fetchone()
+
+        self.assertEqual(
+            historico,
+            (
+                "CONFIRMACAO_SAP",
+                "AGUARDANDO_CONFIRMACAO_SAP",
+                "CONFIRMADO_SAP",
+                "SISTEMA",
+            ),
+        )
 
 if __name__ == "__main__":
     unittest.main()

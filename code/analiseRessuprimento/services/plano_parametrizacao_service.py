@@ -16,6 +16,9 @@ from repositories.plano_parametrizacao_repository import (
     tentar_liberar_item_plano,
     inativar_decisao_ativa_item,
     obter_decisao_ativa_item,
+    atualizar_status_item_confirmacao_sap,
+    inserir_confirmacao_parametrizacao,
+    obter_posicao_binmat_atual,
 )
 
 
@@ -1184,4 +1187,188 @@ def revisar_decisao(
         "decisao": decisao_normalizada,
         "status_item": registro[0],
         "controlador_responsavel": registro[1],
+    }
+
+def confirmar_parametrizacao_sap(
+    conn: sqlite3.Connection,
+    *,
+    id_item_plano: int,
+    arquivo_binmat: str | None = None,
+    hash_binmat: str | None = None,
+) -> dict:
+    """
+    Compara a parametrização proposta com o BINMAT atual.
+
+    Classificações possíveis:
+    - CONFIRMADO
+    - AINDA_NAO_REFLETIDO
+    - DIVERGENTE
+    - POSICAO_NAO_ENCONTRADA
+    """
+
+    try:
+        conn.execute(
+            "BEGIN IMMEDIATE"
+        )
+
+        cursor_item = conn.execute(
+            """
+            SELECT
+                i.id,
+                i.material,
+                i.posicao_pt02,
+                i.min_inicial,
+                i.max_inicial,
+                i.status_item,
+                p.status_plano
+            FROM plano_parametrizacao_item i
+            INNER JOIN plano_parametrizacao p
+                ON p.id = i.id_plano
+            WHERE i.id = ?
+            """,
+            (id_item_plano,),
+        )
+
+        item = cursor_item.fetchone()
+
+        if item is None:
+            raise ValueError(
+                "Item do plano não encontrado."
+            )
+
+        dados_item = {
+            "id": item[0],
+            "material": item[1],
+            "posicao_pt02": item[2],
+            "min_inicial": item[3],
+            "max_inicial": item[4],
+            "status_item": item[5],
+            "status_plano": item[6],
+        }
+
+        if dados_item["status_plano"] != "ATIVO":
+            raise ValueError(
+                "A tarefa pertence a um plano que não está ativo."
+            )
+
+        if (
+            dados_item["status_item"]
+            != "AGUARDANDO_CONFIRMACAO_SAP"
+        ):
+            raise ValueError(
+                "A tarefa não está aguardando confirmação SAP."
+            )
+
+        decisao_ativa = obter_decisao_ativa_item(
+            conn,
+            id_item_plano=id_item_plano,
+        )
+
+        if decisao_ativa is None:
+            raise ValueError(
+                "O item não possui decisão ativa."
+            )
+
+        id_decisao = int(
+            decisao_ativa[0]
+        )
+
+        decisao = decisao_ativa[2]
+        min_proposto = decisao_ativa[3]
+        max_proposto = decisao_ativa[4]
+
+        if decisao != "PARAMETRIZAR":
+            raise ValueError(
+                "A decisão ativa não é de parametrização."
+            )
+
+        if min_proposto is None or max_proposto is None:
+            raise ValueError(
+                "A decisão ativa não possui MIN/MAX propostos."
+            )
+
+        posicao_binmat = obter_posicao_binmat_atual(
+            conn,
+            material=dados_item["material"],
+            posicao=dados_item["posicao_pt02"],
+        )
+
+        if posicao_binmat is None:
+            resultado = "POSICAO_NAO_ENCONTRADA"
+            min_encontrado = None
+            max_encontrado = None
+            status_novo = "AGUARDANDO_CONFIRMACAO_SAP"
+
+        else:
+            min_encontrado = posicao_binmat[0]
+            max_encontrado = posicao_binmat[1]
+
+            if (
+                min_encontrado == min_proposto
+                and max_encontrado == max_proposto
+            ):
+                resultado = "CONFIRMADO"
+                status_novo = "CONFIRMADO_SAP"
+
+            elif (
+                min_encontrado == dados_item["min_inicial"]
+                and max_encontrado == dados_item["max_inicial"]
+            ):
+                resultado = "AINDA_NAO_REFLETIDO"
+                status_novo = "AGUARDANDO_CONFIRMACAO_SAP"
+
+            else:
+                resultado = "DIVERGENTE"
+                status_novo = "DIVERGENCIA_SAP"
+
+        id_confirmacao = inserir_confirmacao_parametrizacao(
+            conn,
+            id_decisao=id_decisao,
+            min_encontrado=min_encontrado,
+            max_encontrado=max_encontrado,
+            resultado=resultado,
+            arquivo_binmat=arquivo_binmat,
+            hash_binmat=hash_binmat,
+        )
+
+        atualizou = atualizar_status_item_confirmacao_sap(
+            conn,
+            id_item_plano=id_item_plano,
+            status_novo=status_novo,
+        )
+
+        if not atualizou:
+            raise ValueError(
+                "O status da tarefa não pôde ser atualizado."
+            )
+
+        inserir_historico_parametrizacao(
+            conn,
+            id_item_plano=id_item_plano,
+            tipo_evento="CONFIRMACAO_SAP",
+            usuario="SISTEMA",
+            origem="SISTEMA",
+            status_anterior="AGUARDANDO_CONFIRMACAO_SAP",
+            status_novo=status_novo,
+            referencia_tipo="CONFIRMACAO",
+            referencia_id=id_confirmacao,
+            descricao=(
+                f"Verificação SAP concluída: {resultado}."
+            ),
+        )
+
+        conn.commit()
+
+    except Exception:
+        conn.rollback()
+        raise
+
+    return {
+        "id_item_plano": id_item_plano,
+        "id_decisao": id_decisao,
+        "id_confirmacao": id_confirmacao,
+        "resultado": resultado,
+        "min_encontrado": min_encontrado,
+        "max_encontrado": max_encontrado,
+        "status_item": status_novo,
     }

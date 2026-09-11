@@ -10,8 +10,10 @@ from repositories.plano_parametrizacao_repository import (
     inserir_historico_parametrizacao,
     inserir_item_plano_parametrizacao,
     inserir_plano_parametrizacao,
+    listar_fila_operacional_plano,
     listar_itens_plano,
     obter_plano_por_id,
+    obter_resumo_operacional_plano,
 )
 
 
@@ -184,6 +186,64 @@ class TestPlanoParametrizacaoRepository(unittest.TestCase):
             1,
         )
 
+    def test_lista_fila_operacional_com_contrato_explicito(self):
+        id_plano = self._criar_plano()
+
+        id_item = self._criar_item(
+            id_plano
+        )
+
+        fila = listar_fila_operacional_plano(
+            self.conn,
+            id_plano=id_plano,
+        )
+
+        self.assertEqual(
+            len(fila),
+            1,
+        )
+
+        item = fila[0]
+
+        self.assertEqual(
+            item["id_item_plano"],
+            id_item,
+        )
+        self.assertEqual(
+            item["material"],
+            "1000001",
+        )
+        self.assertEqual(
+            item["descricao_material"],
+            "Material de teste",
+        )
+        self.assertEqual(
+            item["posicao_pt02"],
+            "PT02-001-001-001",
+        )
+        self.assertEqual(
+            item["prioridade"],
+            1,
+        )
+        self.assertEqual(
+            item["demanda_relevante"],
+            100.0,
+        )
+        self.assertEqual(
+            item["pct_demanda_acumulada"],
+            15.0,
+        )
+        self.assertEqual(
+            item["status"],
+            "DISPONIVEL",
+        )
+        self.assertIsNone(
+            item["controlador_responsavel"],
+        )
+        self.assertIsNone(
+            item["assumido_em"],
+        )
+
     def test_fk_impede_material_inexistente(self):
         id_plano = self._criar_plano()
 
@@ -215,6 +275,34 @@ class TestPlanoParametrizacaoRepository(unittest.TestCase):
                 status_item="DISPONIVEL",
             )
 
+    def test_obtem_resumo_operacional_plano_com_contrato_explicito(self):
+        id_plano = self._criar_plano()
+
+        resumo = obter_resumo_operacional_plano(
+            self.conn,
+            id_plano=id_plano,
+        )
+
+        self.assertIsNotNone(
+            resumo,
+        )
+
+        self.assertEqual(
+            resumo["id_plano"],
+            id_plano,
+        )
+        self.assertEqual(
+            resumo["nome"],
+            "Wave A",
+        )
+        self.assertEqual(
+            resumo["onda"],
+            "A",
+        )
+        self.assertEqual(
+            resumo["status"],
+            "RASCUNHO",
+        )
 
 if __name__ == "__main__":
     unittest.main()

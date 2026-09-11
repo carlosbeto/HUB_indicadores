@@ -237,6 +237,44 @@ def obter_plano_por_id(
         (id_plano,),
     ).fetchone()
 
+def obter_resumo_operacional_plano(
+    conn: sqlite3.Connection,
+    *,
+    id_plano: int,
+) -> dict[str, Any] | None:
+    """
+    Retorna o resumo operacional do plano com contrato explícito.
+    """
+
+    cursor = conn.execute(
+        """
+        SELECT
+            id AS id_plano,
+            nome_plano AS nome,
+            onda,
+            status_plano AS status
+        FROM plano_parametrizacao
+        WHERE id = ?
+        """,
+        (id_plano,),
+    )
+
+    registro = cursor.fetchone()
+
+    if registro is None:
+        return None
+
+    colunas = [
+        descricao[0]
+        for descricao in cursor.description
+    ]
+
+    return dict(
+        zip(
+            colunas,
+            registro,
+        )
+    )
 
 def contar_itens_plano(
     conn: sqlite3.Connection,
@@ -302,6 +340,55 @@ def listar_itens_plano(
         (id_plano,),
     ).fetchall()
 
+def listar_fila_operacional_plano(
+    conn: sqlite3.Connection,
+    *,
+    id_plano: int,
+) -> list[dict[str, Any]]:
+    """
+    Retorna a fila operacional do plano com contrato explícito.
+
+    A fila usa apenas dados persistidos do snapshot e do workflow.
+    Não consulta o estado atual do BINMAT.
+    """
+
+    cursor = conn.execute(
+        """
+        SELECT
+            id AS id_item_plano,
+            material,
+            descricao_material,
+            posicao_pt02,
+            prioridade_inicial AS prioridade,
+            demanda_relevante_inicial AS demanda_relevante,
+            pct_demanda_acumulada_inicial AS pct_demanda_acumulada,
+            status_item AS status,
+            controlador_responsavel,
+            assumido_em
+        FROM plano_parametrizacao_item
+        WHERE id_plano = ?
+        ORDER BY
+            prioridade_inicial,
+            material,
+            posicao_pt02
+        """,
+        (id_plano,),
+    )
+
+    colunas = [
+        descricao[0]
+        for descricao in cursor.description
+    ]
+
+    return [
+        dict(
+            zip(
+                colunas,
+                registro,
+            )
+        )
+        for registro in cursor.fetchall()
+    ]
 
 def obter_item_plano_por_id(
     conn: sqlite3.Connection,

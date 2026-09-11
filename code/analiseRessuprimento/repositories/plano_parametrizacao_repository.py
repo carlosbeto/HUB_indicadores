@@ -548,19 +548,26 @@ def obter_posicao_binmat_atual(
     posicao: str,
 ) -> tuple | None:
     """
-    Retorna o MIN/MAX atual da posição no BINMAT.
+    Retorna o MIN/MAX atual da posição somente quando ela
+    está presente no snapshot BINMAT atual.
     """
 
     return conn.execute(
         """
         SELECT
-            quantidade_minima,
-            quantidade_maxima,
-            arquivo_origem
-        FROM dim_posicao_material
+            p.quantidade_minima,
+            p.quantidade_maxima,
+            p.arquivo_origem
+        FROM dim_posicao_material AS p
+
+        INNER JOIN posicao_material_fontes AS f
+            ON f.id_posicao_material = p.id
+           AND f.fonte = 'BINMAT'
+           AND f.presente_atual = 1
+
         WHERE
-            material = ?
-            AND posicao = ?
+            p.material = ?
+            AND p.posicao = ?
         """,
         (
             material,

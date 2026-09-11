@@ -76,6 +76,30 @@ class TestWorkflowParametrizacaoService(unittest.TestCase):
             """
         )
 
+        self.conn.execute(
+            """
+            CREATE TABLE posicao_material_fontes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id_posicao_material INTEGER NOT NULL,
+                fonte TEXT NOT NULL,
+                primeira_ocorrencia TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                ultima_ocorrencia TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                arquivo_origem TEXT,
+                presente_atual INTEGER NOT NULL DEFAULT 1
+                    CHECK (presente_atual IN (0, 1)),
+
+                FOREIGN KEY (id_posicao_material)
+                    REFERENCES dim_posicao_material(id)
+                    ON DELETE CASCADE,
+
+                UNIQUE (
+                    id_posicao_material,
+                    fonte
+                )
+            )
+            """
+        )
+
         criar_schema_plano_parametrizacao(
             self.conn
         )
@@ -1528,6 +1552,43 @@ class TestWorkflowParametrizacaoService(unittest.TestCase):
                 ),
             )
 
+        # Executado tanto para INSERT quanto para UPDATE.
+        id_posicao = self.conn.execute(
+            """
+            SELECT id
+            FROM dim_posicao_material
+            WHERE
+                material = ?
+                AND posicao = ?
+            """,
+            (
+                material,
+                posicao,
+            ),
+        ).fetchone()[0]
+
+        self.conn.execute(
+            """
+            INSERT INTO posicao_material_fontes (
+                id_posicao_material,
+                fonte,
+                arquivo_origem,
+                presente_atual
+            )
+            VALUES (?, 'BINMAT', 'BINMAT_TESTE.xlsx', 1)
+
+            ON CONFLICT (
+                id_posicao_material,
+                fonte
+            )
+            DO UPDATE SET
+                ultima_ocorrencia = CURRENT_TIMESTAMP,
+                arquivo_origem = excluded.arquivo_origem,
+                presente_atual = 1
+            """,
+            (id_posicao,),
+        )
+
         self.conn.commit()
 
     def test_confirmacao_sap_confirmada_quando_binmat_iguala_proposta(
@@ -1852,6 +1913,58 @@ class TestWorkflowParametrizacaoService(unittest.TestCase):
                 "SISTEMA",
             ),
         )
+
+
+    def test_confirmacao_sap_ignora_posicao_historica_inativa_no_binmat(
+        self,
+    ):
+        dados = self._preparar_item_para_confirmacao()
+
+        self._definir_binmat_atual(
+            material=dados["material"],
+            posicao=dados["posicao"],
+            min_atual=10.0,
+            max_atual=50.0,
+        )
+
+        self.conn.execute(
+            """
+            UPDATE posicao_material_fontes
+            SET presente_atual = 0
+            WHERE
+                fonte = 'BINMAT'
+                AND id_posicao_material = (
+                    SELECT id
+                    FROM dim_posicao_material
+                    WHERE
+                        material = ?
+                        AND posicao = ?
+                )
+            """,
+            (
+                dados["material"],
+                dados["posicao"],
+            ),
+        )
+        self.conn.commit()
+
+        resultado = confirmar_parametrizacao_sap(
+            self.conn,
+            id_item_plano=dados["id_item"],
+            arquivo_binmat="BINMAT_TESTE.xlsx",
+            hash_binmat="HASH_TESTE",
+        )
+
+        self.assertEqual(
+            resultado["resultado"],
+            "POSICAO_NAO_ENCONTRADA",
+        )
+
+        self.assertEqual(
+            resultado["status_item"],
+            "AGUARDANDO_CONFIRMACAO_SAP",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

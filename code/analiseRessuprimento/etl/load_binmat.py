@@ -547,30 +547,15 @@ def carregar_posicoes(
     nome_arquivo: str,
 ) -> tuple[int, int]:
     """
-    Insere novas posições e atualiza posições já existentes.
+    Insere ou atualiza posições da BINMAT e sincroniza
+    a presença atual da relação na fonte BINMAT.
 
-    Chave:
+    A dim_posicao_material permanece consolidada:
+    posições ausentes do novo snapshot não são excluídas.
 
-        deposito
-        + tipo_deposito
-        + posicao
-        + material
-
-    Nesta primeira versão NÃO removemos posições ausentes
-    no novo arquivo.
-
-    Isso é proposital: a futura Visão Geral poderá cadastrar
-    posições T001 que não existem na BINMAT.
-    A política de desativação será definida depois que as duas
-    fontes estiverem integradas.
+    A presença corrente na BINMAT é controlada por
+    posicao_material_fontes.presente_atual.
     """
-
-    # --------------------------------------------------------
-    # Descobrimos as chaves que já existem antes do UPSERT.
-    #
-    # Isso nos permite registrar corretamente:
-    # inseridas x atualizadas
-    # --------------------------------------------------------
 
     chaves_existentes = {
         (
@@ -591,13 +576,31 @@ def carregar_posicoes(
         )
     }
 
-    registros = []
+    registros = [
+        (
+            linha.material,
+            linha.deposito,
+            linha.tipo_deposito,
+            linha.posicao,
+            linha.quantidade_minima,
+            linha.quantidade_maxima,
+            linha.unidade_medida,
+            linha.data_modificacao,
+            linha.momento_criacao,
+            linha.autor,
+            nome_arquivo,
+        )
+        for linha in df.itertuples(
+            index=False,
+        )
+    ]
 
     inseridas = 0
     atualizadas = 0
 
-    for linha in df.itertuples(index=False):
-
+    for linha in df.itertuples(
+        index=False,
+    ):
         chave = (
             linha.deposito,
             linha.tipo_deposito,
@@ -610,21 +613,14 @@ def carregar_posicoes(
         else:
             inseridas += 1
 
-        registros.append(
-            (
-                linha.material,
-                linha.deposito,
-                linha.tipo_deposito,
-                linha.posicao,
-                linha.quantidade_minima,
-                linha.quantidade_maxima,
-                linha.unidade_medida,
-                linha.data_modificacao,
-                linha.momento_criacao,
-                linha.autor,
-                nome_arquivo,
-            )
-        )
+    # A BINMAT representa um snapshot completo da fonte.
+    conn.execute(
+        """
+        UPDATE posicao_material_fontes
+        SET presente_atual = 0
+        WHERE fonte = 'BINMAT'
+        """
+    )
 
     conn.executemany(
         """
@@ -660,6 +656,64 @@ def carregar_posicoes(
             atualizado_em = CURRENT_TIMESTAMP
         """,
         registros,
+    )
+
+    ids_posicoes = []
+
+    for linha in df.itertuples(
+        index=False,
+    ):
+        registro = conn.execute(
+            """
+            SELECT id
+            FROM dim_posicao_material
+            WHERE
+                deposito = ?
+                AND tipo_deposito = ?
+                AND posicao = ?
+                AND material = ?
+            """,
+            (
+                linha.deposito,
+                linha.tipo_deposito,
+                linha.posicao,
+                linha.material,
+            ),
+        ).fetchone()
+
+        if registro is None:
+            raise RuntimeError(
+                "Posição BINMAT não encontrada após UPSERT."
+            )
+
+        ids_posicoes.append(
+            (
+                registro[0],
+                "BINMAT",
+                nome_arquivo,
+            )
+        )
+
+    conn.executemany(
+        """
+        INSERT INTO posicao_material_fontes (
+            id_posicao_material,
+            fonte,
+            arquivo_origem,
+            presente_atual
+        )
+        VALUES (?, ?, ?, 1)
+
+        ON CONFLICT (
+            id_posicao_material,
+            fonte
+        )
+        DO UPDATE SET
+            ultima_ocorrencia = CURRENT_TIMESTAMP,
+            arquivo_origem = excluded.arquivo_origem,
+            presente_atual = 1
+        """,
+        ids_posicoes,
     )
 
     return inseridas, atualizadas

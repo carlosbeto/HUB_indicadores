@@ -19,6 +19,8 @@ from repositories.plano_parametrizacao_repository import (
     atualizar_status_item_confirmacao_sap,
     inserir_confirmacao_parametrizacao,
     obter_posicao_binmat_atual,
+    obter_detalhe_operacional_item_base,
+    obter_ultima_confirmacao_decisao,
 )
 
 
@@ -1371,4 +1373,161 @@ def confirmar_parametrizacao_sap(
         "min_encontrado": min_encontrado,
         "max_encontrado": max_encontrado,
         "status_item": status_novo,
+    }
+
+def obter_detalhe_operacional_tarefa(
+    conn: sqlite3.Connection,
+    *,
+    id_item_plano: int,
+) -> dict:
+    """
+    Monta a visão operacional consolidada de uma tarefa.
+
+    Mantém separados:
+    - snapshot inicial da onda;
+    - estado atual do workflow;
+    - decisão ativa;
+    - última confirmação SAP;
+    - estado atual observado no BINMAT.
+    """
+
+    dados = obter_detalhe_operacional_item_base(
+        conn,
+        id_item_plano=id_item_plano,
+    )
+
+    if dados is None:
+        raise ValueError(
+            "Item do plano não encontrado."
+        )
+
+    decisao = obter_decisao_ativa_item(
+        conn,
+        id_item_plano=id_item_plano,
+    )
+
+    if decisao is None:
+        decisao_ativa = None
+        ultima_confirmacao_sap = None
+
+    else:
+        id_decisao = int(
+            decisao[0]
+        )
+
+        decisao_ativa = {
+            "id": id_decisao,
+            "numero_revisao": decisao[1],
+            "decisao": decisao[2],
+            "min_proposto": decisao[3],
+            "max_proposto": decisao[4],
+            "justificativa": decisao[5],
+            "observacao": decisao[6],
+            "controlador": decisao[7],
+            "decidido_em": decisao[8],
+            "alteracao_sap_informada_em": decisao[9],
+        }
+
+        confirmacao = obter_ultima_confirmacao_decisao(
+            conn,
+            id_decisao=id_decisao,
+        )
+
+        if confirmacao is None:
+            ultima_confirmacao_sap = None
+
+        else:
+            ultima_confirmacao_sap = {
+                "id": confirmacao[0],
+                "id_decisao": confirmacao[1],
+                "min_encontrado": confirmacao[2],
+                "max_encontrado": confirmacao[3],
+                "resultado": confirmacao[4],
+                "arquivo_binmat": confirmacao[5],
+                "hash_binmat": confirmacao[6],
+                "verificado_em": confirmacao[7],
+                "observacao": confirmacao[8],
+            }
+
+    posicao_binmat = obter_posicao_binmat_atual(
+        conn,
+        material=dados["material"],
+        posicao=dados["posicao_pt02"],
+    )
+
+    if posicao_binmat is None:
+        binmat_atual = {
+            "presente": False,
+            "min": None,
+            "max": None,
+            "arquivo_origem": None,
+        }
+
+    else:
+        binmat_atual = {
+            "presente": True,
+            "min": posicao_binmat[0],
+            "max": posicao_binmat[1],
+            "arquivo_origem": posicao_binmat[2],
+        }
+
+    return {
+        "plano": {
+            "id": dados["id_plano"],
+            "nome": dados["nome_plano"],
+            "onda": dados["onda"],
+            "status": dados["status_plano"],
+        },
+
+        "item": {
+            "id": dados["id_item_plano"],
+            "material": dados["material"],
+            "descricao": dados["descricao_material"],
+            "posicao_pt02": dados["posicao_pt02"],
+            "prioridade": dados["prioridade_inicial"],
+            "status": dados["status_item"],
+            "controlador_responsavel": (
+                dados["controlador_responsavel"]
+            ),
+            "assumido_em": dados["assumido_em"],
+        },
+
+        "snapshot_inicial": {
+            "demanda_comercial": (
+                dados["demanda_comercial_inicial"]
+            ),
+            "demanda_tecnica": (
+                dados["demanda_tecnica_inicial"]
+            ),
+            "demanda_relevante": (
+                dados["demanda_relevante_inicial"]
+            ),
+            "pct_demanda_acumulada": (
+                dados["pct_demanda_acumulada_inicial"]
+            ),
+            "min": dados["min_inicial"],
+            "max": dados["max_inicial"],
+            "saldo_pt02_f5": (
+                dados["saldo_pt02_f5_inicial"]
+            ),
+            "saldo_pt02_b5": (
+                dados["saldo_pt02_b5_inicial"]
+            ),
+            "saldo_t001_f5": (
+                dados["saldo_t001_f5_inicial"]
+            ),
+            "saldo_t001_b5": (
+                dados["saldo_t001_b5_inicial"]
+            ),
+            "qtd_posicoes_t001": (
+                dados["qtd_posicoes_t001_inicial"]
+            ),
+            "situacao_fisica": (
+                dados["situacao_fisica_inicial"]
+            ),
+        },
+
+        "decisao_ativa": decisao_ativa,
+        "ultima_confirmacao_sap": ultima_confirmacao_sap,
+        "binmat_atual": binmat_atual,
     }

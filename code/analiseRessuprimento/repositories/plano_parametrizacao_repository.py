@@ -557,7 +557,7 @@ def obter_posicao_binmat_atual(
         SELECT
             p.quantidade_minima,
             p.quantidade_maxima,
-            p.arquivo_origem
+            f.arquivo_origem
         FROM dim_posicao_material AS p
 
         INNER JOIN posicao_material_fontes AS f
@@ -651,3 +651,108 @@ def atualizar_status_item_confirmacao_sap(
     )
 
     return cursor.rowcount == 1
+
+def obter_detalhe_operacional_item_base(
+    conn: sqlite3.Connection,
+    *,
+    id_item_plano: int,
+) -> dict[str, Any] | None:
+    """
+    Retorna os dados estruturais de um item do plano junto com
+    o cabeçalho do plano.
+
+    Esta consulta representa o snapshot persistido da onda e o
+    estado atual do workflow do item. Não consulta o BINMAT atual.
+    """
+
+    cursor = conn.execute(
+        """
+        SELECT
+            p.id AS id_plano,
+            p.nome_plano,
+            p.onda,
+            p.status_plano,
+
+            i.id AS id_item_plano,
+            i.material,
+            i.descricao_material,
+            i.posicao_pt02,
+            i.prioridade_inicial,
+            i.status_item,
+            i.controlador_responsavel,
+            i.assumido_em,
+
+            i.demanda_comercial_inicial,
+            i.demanda_tecnica_inicial,
+            i.demanda_relevante_inicial,
+            i.pct_demanda_acumulada_inicial,
+
+            i.min_inicial,
+            i.max_inicial,
+
+            i.saldo_pt02_f5_inicial,
+            i.saldo_pt02_b5_inicial,
+            i.saldo_t001_f5_inicial,
+            i.saldo_t001_b5_inicial,
+            i.qtd_posicoes_t001_inicial,
+            i.situacao_fisica_inicial
+
+        FROM plano_parametrizacao_item AS i
+
+        INNER JOIN plano_parametrizacao AS p
+            ON p.id = i.id_plano
+
+        WHERE i.id = ?
+        """,
+        (id_item_plano,),
+    )
+
+    registro = cursor.fetchone()
+
+    if registro is None:
+        return None
+
+    colunas = [
+        descricao[0]
+        for descricao in cursor.description
+    ]
+
+    return dict(
+        zip(
+            colunas,
+            registro,
+        )
+    )
+
+
+def obter_ultima_confirmacao_decisao(
+    conn: sqlite3.Connection,
+    *,
+    id_decisao: int,
+) -> tuple | None:
+    """
+    Retorna a confirmação SAP mais recente de uma decisão.
+
+    Uma mesma decisão pode possuir várias verificações.
+    O maior ID representa a última confirmação persistida.
+    """
+
+    return conn.execute(
+        """
+        SELECT
+            id,
+            id_decisao,
+            min_encontrado,
+            max_encontrado,
+            resultado,
+            arquivo_binmat,
+            hash_binmat,
+            verificado_em,
+            observacao
+        FROM parametrizacao_confirmacao
+        WHERE id_decisao = ?
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (id_decisao,),
+    ).fetchone()

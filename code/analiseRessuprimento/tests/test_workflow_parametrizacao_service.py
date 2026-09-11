@@ -15,6 +15,7 @@ from services.plano_parametrizacao_service import (
     registrar_decisao,
     revisar_decisao,
     confirmar_parametrizacao_sap,
+    obter_detalhe_operacional_tarefa,
 )
 
 
@@ -1965,6 +1966,252 @@ class TestWorkflowParametrizacaoService(unittest.TestCase):
             "AGUARDANDO_CONFIRMACAO_SAP",
         )
 
+
+    def test_detalhe_operacional_preserva_snapshot_inicial(
+        self,
+    ):
+        id_plano, id_item = self._criar_plano(
+            ativar=True
+        )
+
+        resultado = obter_detalhe_operacional_tarefa(
+            self.conn,
+            id_item_plano=id_item,
+        )
+
+        self.assertEqual(
+            resultado["plano"]["id"],
+            id_plano,
+        )
+        self.assertEqual(
+            resultado["plano"]["nome"],
+            "Wave Teste",
+        )
+        self.assertEqual(
+            resultado["plano"]["onda"],
+            "TESTE",
+        )
+        self.assertEqual(
+            resultado["plano"]["status"],
+            "ATIVO",
+        )
+
+        self.assertEqual(
+            resultado["item"]["id"],
+            id_item,
+        )
+        self.assertEqual(
+            resultado["item"]["material"],
+            "1000001",
+        )
+        self.assertEqual(
+            resultado["item"]["posicao_pt02"],
+            "PT02-001-001-001",
+        )
+        self.assertEqual(
+            resultado["item"]["prioridade"],
+            1,
+        )
+        self.assertEqual(
+            resultado["item"]["status"],
+            "DISPONIVEL",
+        )
+
+        self.assertEqual(
+            resultado["snapshot_inicial"]["demanda_comercial"],
+            90.0,
+        )
+        self.assertEqual(
+            resultado["snapshot_inicial"]["demanda_tecnica"],
+            10.0,
+        )
+        self.assertEqual(
+            resultado["snapshot_inicial"]["demanda_relevante"],
+            100.0,
+        )
+        self.assertEqual(
+            resultado["snapshot_inicial"]["min"],
+            0.0,
+        )
+        self.assertEqual(
+            resultado["snapshot_inicial"]["max"],
+            0.0,
+        )
+
+        self.assertIsNone(
+            resultado["decisao_ativa"]
+        )
+        self.assertIsNone(
+            resultado["ultima_confirmacao_sap"]
+        )
+
+        self.assertFalse(
+            resultado["binmat_atual"]["presente"]
+        )
+
+
+    def test_detalhe_operacional_separa_snapshot_de_binmat_atual(
+        self,
+    ):
+        _, id_item = self._criar_plano(
+            ativar=True
+        )
+
+        item = self.conn.execute(
+            """
+            SELECT
+                material,
+                posicao_pt02
+            FROM plano_parametrizacao_item
+            WHERE id = ?
+            """,
+            (id_item,),
+        ).fetchone()
+
+        self._definir_binmat_atual(
+            material=item[0],
+            posicao=item[1],
+            min_atual=10.0,
+            max_atual=50.0,
+        )
+
+        resultado = obter_detalhe_operacional_tarefa(
+            self.conn,
+            id_item_plano=id_item,
+        )
+
+        self.assertEqual(
+            resultado["snapshot_inicial"]["min"],
+            0.0,
+        )
+        self.assertEqual(
+            resultado["snapshot_inicial"]["max"],
+            0.0,
+        )
+
+        self.assertTrue(
+            resultado["binmat_atual"]["presente"]
+        )
+        self.assertEqual(
+            resultado["binmat_atual"]["min"],
+            10.0,
+        )
+        self.assertEqual(
+            resultado["binmat_atual"]["max"],
+            50.0,
+        )
+        self.assertEqual(
+            resultado["binmat_atual"]["arquivo_origem"],
+            "BINMAT_TESTE.xlsx",
+        )
+
+
+    def test_detalhe_operacional_retorna_decisao_e_ultima_confirmacao(
+        self,
+    ):
+        dados = self._preparar_item_para_confirmacao(
+            min_inicial=0.0,
+            max_inicial=0.0,
+            min_proposto=10.0,
+            max_proposto=50.0,
+        )
+
+        self._definir_binmat_atual(
+            material=dados["material"],
+            posicao=dados["posicao"],
+            min_atual=0.0,
+            max_atual=0.0,
+        )
+
+        primeira = confirmar_parametrizacao_sap(
+            self.conn,
+            id_item_plano=dados["id_item"],
+            arquivo_binmat="BINMAT_1.xlsx",
+            hash_binmat="HASH_1",
+        )
+
+        self.assertEqual(
+            primeira["resultado"],
+            "AINDA_NAO_REFLETIDO",
+        )
+
+        self._definir_binmat_atual(
+            material=dados["material"],
+            posicao=dados["posicao"],
+            min_atual=10.0,
+            max_atual=50.0,
+        )
+
+        segunda = confirmar_parametrizacao_sap(
+            self.conn,
+            id_item_plano=dados["id_item"],
+            arquivo_binmat="BINMAT_2.xlsx",
+            hash_binmat="HASH_2",
+        )
+
+        self.assertEqual(
+            segunda["resultado"],
+            "CONFIRMADO",
+        )
+
+        resultado = obter_detalhe_operacional_tarefa(
+            self.conn,
+            id_item_plano=dados["id_item"],
+        )
+
+        self.assertEqual(
+            resultado["decisao_ativa"]["id"],
+            dados["id_decisao"],
+        )
+        self.assertEqual(
+            resultado["decisao_ativa"]["numero_revisao"],
+            1,
+        )
+        self.assertEqual(
+            resultado["decisao_ativa"]["decisao"],
+            "PARAMETRIZAR",
+        )
+        self.assertEqual(
+            resultado["decisao_ativa"]["min_proposto"],
+            10.0,
+        )
+        self.assertEqual(
+            resultado["decisao_ativa"]["max_proposto"],
+            50.0,
+        )
+
+        self.assertEqual(
+            resultado["ultima_confirmacao_sap"]["resultado"],
+            "CONFIRMADO",
+        )
+        self.assertEqual(
+            resultado["ultima_confirmacao_sap"]["min_encontrado"],
+            10.0,
+        )
+        self.assertEqual(
+            resultado["ultima_confirmacao_sap"]["max_encontrado"],
+            50.0,
+        )
+        self.assertEqual(
+            resultado["ultima_confirmacao_sap"]["arquivo_binmat"],
+            "BINMAT_2.xlsx",
+        )
+        self.assertEqual(
+            resultado["ultima_confirmacao_sap"]["hash_binmat"],
+            "HASH_2",
+        )
+
+        self.assertTrue(
+            resultado["binmat_atual"]["presente"]
+        )
+        self.assertEqual(
+            resultado["binmat_atual"]["min"],
+            10.0,
+        )
+        self.assertEqual(
+            resultado["binmat_atual"]["max"],
+            50.0,
+        )
 
 if __name__ == "__main__":
     unittest.main()

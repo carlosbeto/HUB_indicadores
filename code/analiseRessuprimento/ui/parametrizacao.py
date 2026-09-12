@@ -8,6 +8,7 @@ from repositories.plano_parametrizacao_repository import (
 )
 
 from services.plano_parametrizacao_service import (
+    ativar_plano_parametrizacao,
     obter_detalhe_operacional_tarefa,
 )
 
@@ -16,11 +17,19 @@ def render_parametrizacao(
     conn: sqlite3.Connection,
     *,
     id_plano: int,
+    usuario: dict,
 ) -> None:
+    """Renderiza a parametrização e as ações permitidas no estado atual.
+
+    O usuário chega validado por ``app.py``. A camada de serviço ainda repete
+    a validação no momento da escrita, pois uma interface nunca deve ser a
+    única proteção de uma regra de negócio.
+    """
+
     plano = obter_resumo_operacional_plano(
-    conn,
-    id_plano=id_plano,
-)
+        conn,
+        id_plano=id_plano,
+    )
 
     if plano is None:
         st.error(
@@ -35,11 +44,70 @@ def render_parametrizacao(
 
     st.title("Parametrização PT02")
 
+    # A identidade fica visível durante toda a operação. Isso reduz o risco
+    # de uma ação ser executada sem que o controlador perceba qual matrícula
+    # será registrada no banco.
+    st.caption(
+        f"Usuário: {usuario['nome']} — {usuario['matricula']}"
+    )
+
     st.caption(
         f"Plano: {plano['nome']} | "
         f"Onda: {plano['onda']} | "
         f"Status: {plano['status']}"
     )
+
+    # A mensagem é colocada na sessão antes do rerun. Sem esse pequeno estado
+    # temporário, o Streamlit reconstruiria a página após a ativação e a
+    # confirmação de sucesso desapareceria imediatamente.
+    chave_mensagem = f"mensagem_ativacao_plano_{id_plano}"
+    mensagem_ativacao = st.session_state.pop(
+        chave_mensagem,
+        None,
+    )
+
+    if mensagem_ativacao is not None:
+        st.success(mensagem_ativacao)
+
+    if plano["status"] == "RASCUNHO":
+        st.warning(
+            "A Wave A ainda está em rascunho. Ative o plano para "
+            "iniciar o workflow operacional."
+        )
+
+        # A confirmação separada protege uma transição que não deve ocorrer
+        # por um clique acidental durante a navegação ou demonstração.
+        confirmou_ativacao = st.checkbox(
+            "Confirmo a ativação da Wave A.",
+            key=f"confirmar_ativacao_plano_{id_plano}",
+        )
+
+        ativar = st.button(
+            "Ativar Wave A",
+            type="primary",
+            disabled=not confirmou_ativacao,
+            key=f"ativar_plano_{id_plano}",
+        )
+
+        if ativar:
+            try:
+                # A interface apenas solicita a transição. Validação do
+                # usuário, estado do plano, concorrência, commit e rollback
+                # permanecem centralizados no service.
+                ativar_plano_parametrizacao(
+                    conn,
+                    id_plano=id_plano,
+                    matricula=usuario["matricula"],
+                )
+
+            except ValueError as erro:
+                st.error(str(erro))
+
+            else:
+                st.session_state[chave_mensagem] = (
+                    "Wave A ativada com sucesso."
+                )
+                st.rerun()
 
     st.subheader("Fila operacional")
 

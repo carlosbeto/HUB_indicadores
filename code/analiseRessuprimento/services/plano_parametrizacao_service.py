@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import re
 import sqlite3
 
 import pandas as pd
@@ -21,6 +22,12 @@ from repositories.plano_parametrizacao_repository import (
     obter_posicao_binmat_atual,
     obter_detalhe_operacional_item_base,
     obter_ultima_confirmacao_decisao,
+    obter_ativacao_plano,
+    obter_resumo_operacional_plano,
+    tentar_ativar_plano_parametrizacao,
+)
+from repositories.usuario_repository import (
+    obter_usuario_por_matricula,
 )
 
 
@@ -29,6 +36,120 @@ STATUS_ITEM_INICIAL = "DISPONIVEL"
 USUARIO_CRIACAO_PADRAO = "SISTEMA"
 
 CRITERIO_PRIORIDADE = "DEMANDA_RELEVANTE_DESC"
+
+PADRAO_MATRICULA = re.compile(
+    r"^[A-Z]{2}[0-9]{6}$"
+)
+
+
+def _normalizar_matricula_operacional(
+    matricula: str,
+) -> str:
+    """Normaliza a matrícula usada nas ações do workflow.
+
+    Esta validação pequena fica próxima da ativação neste incremento. Quando
+    o sistema completo de usuários for construído, ela poderá ser movida para
+    um serviço central de identidade sem alterar o contrato da ativação.
+    """
+
+    if not isinstance(matricula, str):
+        raise ValueError(
+            "A matrícula deve ser informada como texto."
+        )
+
+    matricula_normalizada = matricula.strip().upper()
+
+    if not PADRAO_MATRICULA.fullmatch(
+        matricula_normalizada
+    ):
+        raise ValueError(
+            "A matrícula deve conter duas letras e seis números."
+        )
+
+    return matricula_normalizada
+
+
+def ativar_plano_parametrizacao(
+    conn: sqlite3.Connection,
+    *,
+    id_plano: int,
+    matricula: str,
+) -> dict:
+    """Ativa um plano em rascunho por um usuário cadastrado e ativo.
+
+    A transação usa ``BEGIN IMMEDIATE`` porque a ativação é uma mudança de
+    estado operacional. Isso impede que duas conexões validem o mesmo
+    rascunho e o ativem concorrentemente.
+
+    A função não altera os itens do plano: eles permanecem disponíveis e só
+    mudam quando o futuro comando ``Assumir tarefa`` for executado.
+    """
+
+    matricula_normalizada = _normalizar_matricula_operacional(
+        matricula
+    )
+
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+
+        usuario = obter_usuario_por_matricula(
+            conn,
+            matricula=matricula_normalizada,
+        )
+
+        if usuario is None:
+            raise ValueError(
+                "Matrícula não cadastrada."
+            )
+
+        if usuario["ativo"] != "SIM":
+            raise ValueError(
+                "Usuário inativo."
+            )
+
+        plano = obter_resumo_operacional_plano(
+            conn,
+            id_plano=id_plano,
+        )
+
+        if plano is None:
+            raise ValueError(
+                "Plano de parametrização não encontrado."
+            )
+
+        if plano["status"] != "RASCUNHO":
+            raise ValueError(
+                "Somente um plano em rascunho pode ser ativado."
+            )
+
+        ativou = tentar_ativar_plano_parametrizacao(
+            conn,
+            id_plano=id_plano,
+            ativado_por=matricula_normalizada,
+        )
+
+        if not ativou:
+            raise ValueError(
+                "O plano não pôde ser ativado porque seu estado mudou."
+            )
+
+        conn.commit()
+
+    except Exception:
+        conn.rollback()
+        raise
+
+    ativacao = obter_ativacao_plano(
+        conn,
+        id_plano=id_plano,
+    )
+
+    if ativacao is None:
+        raise RuntimeError(
+            "O plano ativado não pôde ser recuperado."
+        )
+
+    return ativacao
 
 
 # ============================================================

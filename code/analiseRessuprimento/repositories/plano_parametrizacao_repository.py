@@ -276,6 +276,77 @@ def obter_resumo_operacional_plano(
         )
     )
 
+
+def tentar_ativar_plano_parametrizacao(
+    conn: sqlite3.Connection,
+    *,
+    id_plano: int,
+    ativado_por: str,
+) -> bool:
+    """Ativa atomicamente um plano que ainda esteja em rascunho.
+
+    O estado ``RASCUNHO`` faz parte do próprio ``WHERE`` para proteger a
+    transição contra duas tentativas simultâneas. O repository não executa
+    commit: a transação pertence ao service, que reúne todas as validações.
+    """
+
+    cursor = conn.execute(
+        """
+        UPDATE plano_parametrizacao
+        SET
+            status_plano = 'ATIVO',
+            ativado_por = ?,
+            ativado_em = CURRENT_TIMESTAMP
+        WHERE
+            id = ?
+            AND status_plano = 'RASCUNHO'
+        """,
+        (
+            ativado_por,
+            id_plano,
+        ),
+    )
+
+    return cursor.rowcount == 1
+
+
+def obter_ativacao_plano(
+    conn: sqlite3.Connection,
+    *,
+    id_plano: int,
+) -> dict[str, Any] | None:
+    """Retorna o estado e os dados de ativação com contrato explícito."""
+
+    cursor = conn.execute(
+        """
+        SELECT
+            id AS id_plano,
+            status_plano AS status,
+            ativado_por,
+            ativado_em
+        FROM plano_parametrizacao
+        WHERE id = ?
+        """,
+        (id_plano,),
+    )
+
+    registro = cursor.fetchone()
+
+    if registro is None:
+        return None
+
+    colunas = [
+        descricao[0]
+        for descricao in cursor.description
+    ]
+
+    return dict(
+        zip(
+            colunas,
+            registro,
+        )
+    )
+
 def contar_itens_plano(
     conn: sqlite3.Connection,
     id_plano: int,

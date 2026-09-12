@@ -57,6 +57,42 @@ def carregar_migration_001():
     return modulo
 
 
+def carregar_migration_002():
+    """
+    Carrega a migration 002 diretamente pelo caminho do arquivo.
+
+    O prefixo numérico do nome do arquivo impede importação
+    Python convencional, então usamos importlib.
+    """
+
+    migration_path = (
+        BASE_DIR
+        / "migrations"
+        / "002_cria_usuarios_e_relacionamentos.py"
+    )
+
+    if not migration_path.exists():
+        raise FileNotFoundError(
+            "Migration 002 não encontrada. "
+            f"Caminho esperado: {migration_path}"
+        )
+
+    spec = importlib.util.spec_from_file_location(
+        "migration_002_cria_usuarios_e_relacionamentos",
+        migration_path,
+    )
+
+    if spec is None or spec.loader is None:
+        raise RuntimeError(
+            "Não foi possível carregar a migration 002."
+        )
+
+    modulo = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(modulo)
+
+    return modulo
+
+
 def criar_banco(
     db_path: Path | None = None,
 ) -> None:
@@ -558,6 +594,9 @@ def criar_banco(
     migration_001 = carregar_migration_001()
     migration_001.aplicar_migration(banco)
 
+    migration_002 = carregar_migration_002()
+    migration_002.aplicar_migration(banco)
+
     print()
     print("Banco criado/validado com sucesso.")
     print()
@@ -570,6 +609,7 @@ def criar_banco(
     print("  - etl_execucoes")
     print("  - etl_arquivos_processados")
     print("  - schema_migrations")
+    print("  - usuarios")
     print("  - plano_parametrizacao")
     print("  - plano_parametrizacao_item")
     print("  - parametrizacao_decisao")
@@ -586,6 +626,10 @@ def criar_banco(
     print("  plano_parametrizacao_item 1:N parametrizacao_decisao")
     print("  parametrizacao_decisao 1:N parametrizacao_confirmacao")
     print("  plano_parametrizacao_item 1:N parametrizacao_historico")
+    print("  usuarios 1:N plano_parametrizacao")
+    print("  usuarios 1:N plano_parametrizacao_item")
+    print("  usuarios 1:N parametrizacao_decisao")
+    print("  usuarios 1:N parametrizacao_historico")
     print()
     print("=" * 70)
 

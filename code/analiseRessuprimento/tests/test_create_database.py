@@ -218,6 +218,19 @@ class TestCreateDatabase(unittest.TestCase):
 
         self.conn.execute(
             """
+            INSERT INTO usuarios (
+                matricula,
+                nome
+            )
+            VALUES (
+                'TT000001',
+                'USUARIO TESTE'
+            );
+            """
+        )
+
+        self.conn.execute(
+            """
             INSERT INTO parametrizacao_decisao (
                 id_item_plano,
                 numero_revisao,
@@ -229,7 +242,7 @@ class TestCreateDatabase(unittest.TestCase):
                 ?,
                 1,
                 'INVESTIGAR',
-                'TESTE',
+                'TT000001',
                 1
             );
             """,
@@ -250,7 +263,7 @@ class TestCreateDatabase(unittest.TestCase):
                     ?,
                     2,
                     'REVISAR_POSTERIORMENTE',
-                    'TESTE',
+                    'TT000001',
                     1
                 );
                 """,

@@ -86,7 +86,7 @@ class TestCreateDatabase(unittest.TestCase):
 
         - schema operacional;
         - schema do plano de parametrização;
-        - migration 001 registrada.
+        - migrations estruturais 001, 002 e 003 registradas.
         """
 
         tabelas_esperadas = {
@@ -228,6 +228,27 @@ class TestCreateDatabase(unittest.TestCase):
             );
             """
         )
+
+        migration_003 = self.conn.execute(
+            """
+            SELECT version, nome
+            FROM schema_migrations
+            WHERE version = 3;
+            """
+        ).fetchone()
+
+        self.assertEqual(
+            migration_003,
+            (3, "003_adiciona_umb_mb51"),
+        )
+
+        colunas_mb51 = {
+            linha[1]
+            for linha in self.conn.execute(
+                "PRAGMA table_info(fact_mb51_movimentos);"
+            ).fetchall()
+        }
+        self.assertIn("unidade_medida_basica", colunas_mb51)
 
         self.conn.execute(
             """

@@ -1,5 +1,14 @@
 from __future__ import annotations
 
+"""
+Testes da migration 002 sem acesso ao banco DEV real.
+
+Cada cenário cria um SQLite descartável. Parte dos testes valida que um
+banco novo recebe automaticamente as migrations 001 e 002. Os demais
+simulam um banco legado parado na versão 001, adicionam dados anteriores
+e só então executam a 002 para comprovar preservação e integridade.
+"""
+
 import importlib.util
 import sqlite3
 import tempfile
@@ -24,6 +33,8 @@ MIGRATION_002_PATH = (
 
 
 def carregar_modulo(caminho: Path, nome_modulo: str):
+    """Importa scripts numerados diretamente pelo caminho do arquivo."""
+
     spec = importlib.util.spec_from_file_location(
         nome_modulo,
         caminho,
@@ -41,14 +52,19 @@ def carregar_modulo(caminho: Path, nome_modulo: str):
 
 
 class TestArquivoMigration002(unittest.TestCase):
+    """Valida existência e integração da migration no criador do banco."""
 
     def test_migration_002_existe(self) -> None:
+        """Impede que os contratos sejam ignorados sem a migration."""
+
         self.assertTrue(
             MIGRATION_002_PATH.exists(),
             "A migration 002 ainda não foi criada.",
         )
 
     def test_create_database_aplica_migration_002(self) -> None:
+        """Confirma que um banco novo já nasce na versão estrutural 002."""
+
         with tempfile.TemporaryDirectory() as temp_dir:
             db_path = (
                 Path(temp_dir)
@@ -100,8 +116,11 @@ class TestArquivoMigration002(unittest.TestCase):
     "A migration 002 ainda não foi criada.",
 )
 class TestMigration002Usuarios(unittest.TestCase):
+    """Exercita a atualização de um banco legado da versão 001 para 002."""
 
     def setUp(self) -> None:
+        """Cria um banco temporário na versão 001 e aplica a migration 002."""
+
         self.temp_dir = tempfile.TemporaryDirectory()
 
         self.db_path = (
@@ -114,7 +133,19 @@ class TestMigration002Usuarios(unittest.TestCase):
             "create_database_antes_migration_002",
         )
 
+        # O criador oficial já conhece a migration 002. Aqui ela é
+        # neutralizada para reproduzir o banco DEV antes da atualização:
+        # schema-base e migration 001, mas ainda sem a migration 002.
         create_database.carregar_migration_002 = lambda: (
+            SimpleNamespace(
+                aplicar_migration=lambda _db_path: None,
+            )
+        )
+
+        # A migration 003 depende formalmente da 002. Como este teste
+        # precisa observar o banco exatamente antes da versão 002, também
+        # neutralizamos as migrations posteriores durante a preparação.
+        create_database.carregar_migration_003 = lambda: (
             SimpleNamespace(
                 aplicar_migration=lambda _db_path: None,
             )
@@ -134,6 +165,8 @@ class TestMigration002Usuarios(unittest.TestCase):
         self.conn.execute("PRAGMA foreign_keys = ON;")
 
     def tearDown(self) -> None:
+        """Fecha conexões antes de remover o SQLite temporário no Windows."""
+
         if hasattr(self, "conn"):
             try:
                 self.conn.rollback()
@@ -143,6 +176,8 @@ class TestMigration002Usuarios(unittest.TestCase):
         self.temp_dir.cleanup()
 
     def _criar_baseline_anterior(self) -> None:
+        """Insere plano, item e histórico anteriores à versão 002."""
+
         conn = sqlite3.connect(self.db_path)
         conn.execute("PRAGMA foreign_keys = ON;")
 
@@ -244,6 +279,8 @@ class TestMigration002Usuarios(unittest.TestCase):
             conn.close()
 
     def test_cria_tabela_usuarios_e_registra_migration(self) -> None:
+        """Valida a nova entidade e o registro da versão aplicada."""
+
         colunas = {
             registro[1]
             for registro in self.conn.execute(
@@ -280,6 +317,8 @@ class TestMigration002Usuarios(unittest.TestCase):
         )
 
     def test_valida_matricula_nome_atividade_e_unicidade(self) -> None:
+        """Protege as regras estruturais do cadastro de usuários."""
+
         self.conn.execute(
             """
             INSERT INTO usuarios (matricula, nome)
@@ -331,6 +370,8 @@ class TestMigration002Usuarios(unittest.TestCase):
                     self.conn.execute(sql, parametros)
 
     def test_relacionamentos_humanos_apontam_para_usuarios(self) -> None:
+        """Confirma no catálogo do SQLite as quatro FKs humanas."""
+
         relacionamentos = {
             "plano_parametrizacao": (
                 "ativado_por",
@@ -368,6 +409,8 @@ class TestMigration002Usuarios(unittest.TestCase):
                 )
 
     def test_preserva_dados_anteriores_e_integridade(self) -> None:
+        """Garante que reconstruir tabelas não perde registros legados."""
+
         contagens = {
             "plano_parametrizacao": 1,
             "plano_parametrizacao_item": 1,
@@ -406,6 +449,8 @@ class TestMigration002Usuarios(unittest.TestCase):
         self.assertEqual(erros_fk, [])
 
     def test_rejeita_referencias_a_usuario_inexistente(self) -> None:
+        """Comprova que as FKs bloqueiam matrículas não cadastradas."""
+
         id_plano = self.conn.execute(
             "SELECT id FROM plano_parametrizacao;"
         ).fetchone()[0]

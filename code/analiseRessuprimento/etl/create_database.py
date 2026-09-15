@@ -93,6 +93,30 @@ def carregar_migration_002():
     return modulo
 
 
+def carregar_migration_003():
+    """Carrega a migration que adiciona a UMB aos movimentos MB51."""
+
+    migration_path = (
+        BASE_DIR / "migrations" / "003_adiciona_umb_mb51.py"
+    )
+    if not migration_path.exists():
+        raise FileNotFoundError(
+            "Migration 003 não encontrada. "
+            f"Caminho esperado: {migration_path}"
+        )
+
+    spec = importlib.util.spec_from_file_location(
+        "migration_003_adiciona_umb_mb51",
+        migration_path,
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError("Não foi possível carregar a migration 003.")
+
+    modulo = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(modulo)
+    return modulo
+
+
 def criar_banco(
     db_path: Path | None = None,
 ) -> None:
@@ -191,6 +215,7 @@ def criar_banco(
                 debito_credito TEXT,
 
                 quantidade REAL NOT NULL,
+                unidade_medida_basica TEXT,
 
                 documento_material TEXT NOT NULL,
                 item_documento TEXT NOT NULL,
@@ -596,6 +621,9 @@ def criar_banco(
 
     migration_002 = carregar_migration_002()
     migration_002.aplicar_migration(banco)
+
+    migration_003 = carregar_migration_003()
+    migration_003.aplicar_migration(banco)
 
     print()
     print("Banco criado/validado com sucesso.")

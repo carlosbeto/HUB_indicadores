@@ -59,6 +59,7 @@ COLUNAS_MB51 = [
     "Cód.débito/crédito",
     "Tipo de movimento",
     "Quantidade",
+    "UMB",
     "Doc.material",
     "Item doc.material",
     "Centro custo",
@@ -364,6 +365,7 @@ def carregar_movimentos(
             tipo_movimento,
             debito_credito,
             quantidade,
+            unidade_medida_basica,
             documento_material,
             item_documento,
             deposito,
@@ -371,7 +373,7 @@ def carregar_movimentos(
             usuario,
             arquivo_origem
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """
 
     total_inseridas = 0
@@ -384,6 +386,7 @@ def carregar_movimentos(
                 "tipo_movimento",
                 "debito_credito",
                 "quantidade",
+                "unidade_medida_basica",
                 "documento_material",
                 "item_documento",
                 "deposito",
@@ -463,6 +466,13 @@ def preparar_dataframe(
         normalizar_quantidade
     )
 
+    # A quantidade carregada acima está expressa na unidade de medida
+    # básica do material (UMB). Mantemos os dois campos juntos para não
+    # confundir esse valor com a unidade usada no registro do movimento.
+    resultado["unidade_medida_basica"] = df["UMB"].map(
+        normalizar_texto
+    )
+
     resultado["documento_material"] = df[
         "Doc.material"
     ].map(normalizar_codigo)
@@ -501,6 +511,7 @@ def validar_dados_preparados(
         "data_lancamento",
         "tipo_movimento",
         "quantidade",
+        "unidade_medida_basica",
         "documento_material",
         "item_documento",
     ]

@@ -8,9 +8,41 @@ from repositories.plano_parametrizacao_repository import (
 )
 
 from services.plano_parametrizacao_service import (
+    assumir_tarefa,
     ativar_plano_parametrizacao,
+    liberar_tarefa,
     obter_detalhe_operacional_tarefa,
 )
+
+
+def _obter_acoes_tarefa(
+    *,
+    status_plano: str,
+    status_item: str,
+    controlador_responsavel: str | None,
+    matricula_usuario: str,
+) -> dict[str, bool]:
+    """Informa quais comandos a interface pode apresentar ao usuário.
+
+    Esta função não grava dados. Ela apenas traduz os estados do workflow em
+    visibilidade dos botões. O service repete todas as validações no momento
+    da escrita, protegendo o banco mesmo que duas pessoas atuem ao mesmo tempo.
+    """
+
+    plano_ativo = status_plano == "ATIVO"
+
+    return {
+        "assumir": (
+            plano_ativo
+            and status_item == "DISPONIVEL"
+            and controlador_responsavel is None
+        ),
+        "liberar": (
+            plano_ativo
+            and status_item == "EM_ANALISE"
+            and controlador_responsavel == matricula_usuario
+        ),
+    }
 
 
 def render_parametrizacao(
@@ -68,6 +100,18 @@ def render_parametrizacao(
 
     if mensagem_ativacao is not None:
         st.success(mensagem_ativacao)
+
+    # A confirmação de uma tarefa assumida também precisa sobreviver ao
+    # rerun que atualiza a fila. A chave é independente da ativação porque
+    # cada mensagem representa uma ação operacional diferente.
+    chave_mensagem_tarefa = "mensagem_workflow_parametrizacao"
+    mensagem_tarefa = st.session_state.pop(
+        chave_mensagem_tarefa,
+        None,
+    )
+
+    if mensagem_tarefa is not None:
+        st.success(mensagem_tarefa)
 
     if plano["status"] == "RASCUNHO":
         st.warning(
@@ -164,6 +208,79 @@ def render_parametrizacao(
         f"Prioridade: {item['prioridade']} | "
         f"Status: {item['status']}"
     )
+
+    # --------------------------------------------------------
+    # PRIMEIRO COMANDO OPERACIONAL: ASSUMIR TAREFA
+    # --------------------------------------------------------
+    # O botão somente aparece quando as duas condições de negócio já estão
+    # visíveis na tela: plano ativo e item disponível. Mesmo assim, o service
+    # repete essas validações dentro de uma transação, pois o estado pode mudar
+    # entre a renderização da página e o clique do usuário.
+    acoes = _obter_acoes_tarefa(
+        status_plano=detalhe["plano"]["status"],
+        status_item=item["status"],
+        controlador_responsavel=item["controlador_responsavel"],
+        matricula_usuario=usuario["matricula"],
+    )
+
+    if acoes["assumir"]:
+        if st.button(
+            "Assumir tarefa",
+            type="primary",
+            key=f"assumir_tarefa_{id_item_plano}",
+        ):
+            try:
+                assumir_tarefa(
+                    conn,
+                    id_item_plano=id_item_plano,
+                    controlador=usuario["matricula"],
+                )
+
+            except ValueError as erro:
+                # Erros de domínio são apresentados sem detalhes técnicos.
+                # Exemplos: outro controlador assumiu primeiro ou o plano
+                # deixou de estar ativo antes do clique.
+                st.error(str(erro))
+
+            else:
+                st.session_state[chave_mensagem_tarefa] = (
+                    f"Tarefa do material {item['material']} "
+                    "assumida com sucesso."
+                )
+                st.rerun()
+
+    elif item["status"] == "EM_ANALISE":
+        if acoes["liberar"]:
+            st.success(
+                "Esta tarefa está sob sua responsabilidade."
+            )
+
+            # Liberar não apaga histórico: o service registra a transição e
+            # devolve a tarefa à fila para que outro controlador possa assumir.
+            if st.button(
+                "Liberar tarefa",
+                key=f"liberar_tarefa_{id_item_plano}",
+            ):
+                try:
+                    liberar_tarefa(
+                        conn,
+                        id_item_plano=id_item_plano,
+                        controlador=usuario["matricula"],
+                    )
+
+                except ValueError as erro:
+                    st.error(str(erro))
+
+                else:
+                    st.session_state[chave_mensagem_tarefa] = (
+                        f"Tarefa do material {item['material']} "
+                        "liberada com sucesso."
+                    )
+                    st.rerun()
+        else:
+            st.info(
+                "Esta tarefa está em análise por outro controlador."
+            )
 
     col1, col2, col3 = st.columns(3)
 

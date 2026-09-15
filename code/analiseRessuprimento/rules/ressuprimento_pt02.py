@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+# Versão de entrega: 2026-09-14, incluindo saldos F5 inferidos.
+
 import sqlite3
 
 import pandas as pd
@@ -50,6 +52,7 @@ def _consolidar_saldo_pt02(
                 "saldo_pt02_f5",
                 "saldo_pt02_b5",
                 "f5_identificado",
+                "posicao_visao_geral_identificada",
             ]
         )
 
@@ -97,6 +100,10 @@ def _consolidar_saldo_pt02(
     else:
         saldo["saldo_pt02_b5"] = 0.0
 
+    # Se a consolidação produziu a chave material + posição, sabemos que a
+    # relação apareceu na VISAO_GERAL, ainda que somente com estoque B5.
+    saldo["posicao_visao_geral_identificada"] = True
+
     return saldo[
         [
             "material",
@@ -104,83 +111,71 @@ def _consolidar_saldo_pt02(
             "saldo_pt02_f5",
             "saldo_pt02_b5",
             "f5_identificado",
+            "posicao_visao_geral_identificada",
         ]
     ]
 
 
 # ============================================================
-# CLASSIFICAÇÃO OPERACIONAL
+# CLASSIFICAÇÃO DA PARAMETRIZAÇÃO PT02
 # ============================================================
 
-def _classificar_status(
+def _classificar_parametrizacao_pt02(
     linha: pd.Series,
 ) -> str:
     """
-    Classifica a situação operacional da PT02.
+    Diagnostica os parâmetros MIN/MAX sem decidir o ressuprimento.
 
-    Ordem das regras é intencional.
+    Essa separação é essencial: uma PT02 com MIN/MAX zerados ainda pode
+    precisar de abastecimento quando seu saldo está abaixo da média mensal.
     """
 
     minimo = linha["quantidade_minima"]
     maximo = linha["quantidade_maxima"]
 
     # --------------------------------------------
-    # Sem parametrização
-    # --------------------------------------------
-
     if minimo == 0 and maximo == 0:
         return "PARAMETRIZAÇÃO PENDENTE"
 
     # --------------------------------------------
-    # Proteção para parametrização incompleta
-    # --------------------------------------------
-
     if pd.isna(minimo) or pd.isna(maximo):
         return "PARAMETRIZAÇÃO INCOMPLETA"
 
     # --------------------------------------------
-    # Consistência dos parâmetros MIN/MAX
-    # --------------------------------------------
-
     if maximo < minimo:
         return "PARÂMETROS MIN/MAX INVÁLIDOS"
 
     if maximo == minimo:
         return "PARÂMETROS MIN/MAX A REVISAR"
 
-    # --------------------------------------------
-    # Sem saldo F5 identificado na fotografia
-    # --------------------------------------------
+    return "PARAMETRIZADA"
 
-    if not bool(linha["f5_identificado"]):
-        return "SALDO PT02 NÃO IDENTIFICADO"
 
-    saldo_pt02 = float(
-        linha["saldo_pt02_f5"]
+# ============================================================
+# CLASSIFICAÇÃO OPERACIONAL
+# ============================================================
+
+def _classificar_status_operacional(
+    linha: pd.Series,
+) -> str:
+    """Classifica a necessidade pela média mensal e pelos saldos F5.
+
+    A BINMAT não participa desta decisão. Primeiro identificamos se o picking
+    precisa de estoque; depois informamos separadamente se os parâmetros
+    MIN/MAX também exigem manutenção.
+    """
+
+    necessidade = float(
+        linha["necessidade_ressuprimento"]
     )
 
-    # --------------------------------------------
-    # Acima do MIN
-    # --------------------------------------------
-
-    if saldo_pt02 > minimo:
+    # Saldo igual ou superior à média mensal produz necessidade zero.
+    if necessidade <= 0:
         return "SEM NECESSIDADE"
-
-    # --------------------------------------------
-    # Atingiu ou ficou abaixo do MIN
-    # --------------------------------------------
-
-    necessidade = max(
-        float(maximo) - saldo_pt02,
-        0.0,
-    )
 
     saldo_t001 = float(
         linha["saldo_t001_f5"]
     )
-
-    if necessidade <= 0:
-        return "SEM NECESSIDADE"
 
     if saldo_t001 <= 0:
         return "SEM SALDO T001"
@@ -189,6 +184,25 @@ def _classificar_status(
         return "RESSUPRIR PARCIAL"
 
     return "RESSUPRIR"
+
+
+def _classificar_origem_saldo_pt02(
+    linha: pd.Series,
+) -> str:
+    """Explica se o saldo F5 foi lido ou inferido como zero.
+
+    A inferência permite emitir o alerta preventivo, enquanto este diagnóstico
+    impede que o usuário confunda ausência no relatório com um zero informado
+    explicitamente pelo SAP.
+    """
+
+    if bool(linha["f5_identificado"]):
+        return "F5 INFORMADO"
+
+    if bool(linha["posicao_visao_geral_identificada"]):
+        return "SOMENTE B5 - F5 ASSUMIDO ZERO"
+
+    return "AUSENTE NA VISAO GERAL - F5 ASSUMIDO ZERO"
 
 
 # ============================================================
@@ -203,16 +217,25 @@ def calcular_radar_ressuprimento_pt02(
     Constrói o radar operacional de ressuprimento PT02.
 
     Princípios:
-    - BINMAT define MIN/MAX;
+    - a MB51 fornece a demanda líquida de uma janela móvel;
+    - média mensal = demanda líquida / quantidade de meses;
     - VISAO_GERAL fornece a fotografia de estoque;
     - somente F5 é disponível para transferência;
     - B5 é apenas diagnóstico;
-    - saldo <= MIN dispara avaliação de ressuprimento;
-    - objetivo é abastecer em direção ao MAX;
+    - saldo PT02 abaixo da média mensal dispara a necessidade;
+    - necessidade = média mensal - saldo PT02 F5;
     - todas as T001 atuais do material são agregadas;
-    - demanda líquida de 6 meses ordena a prioridade;
-    - demanda NÃO é o gatilho do ressuprimento.
+    - o saldo T001 limita a quantidade que pode ser movimentada;
+    - MIN/MAX são diagnóstico paralelo de parametrização.
     """
+
+    # Embora o repository de demanda também valide este argumento, a regra
+    # protege seu próprio contrato. Isso evita divisão por zero caso uma fonte
+    # seja substituída em teste ou em uma futura integração.
+    if meses <= 0:
+        raise ValueError(
+            "A quantidade de meses deve ser maior que zero."
+        )
 
     # --------------------------------------------------------
     # 1. Fontes homologadas
@@ -267,17 +290,37 @@ def calcular_radar_ressuprimento_pt02(
         validate="one_to_one",
     )
 
-    # Ausência após LEFT JOIN significa que não encontramos
-    # linha F5/B5 dessa PT02 na fotografia atual.
+    # eq(True) converte tanto False quanto ausência do LEFT JOIN em False sem
+    # depender do downcasting implícito do pandas, removendo o FutureWarning.
     df["f5_identificado"] = (
-        df["f5_identificado"]
-        .fillna(False)
-        .astype(bool)
+        df["f5_identificado"].eq(True)
     )
 
-    df["saldo_pt02_b5"] = (
-        df["saldo_pt02_b5"]
-        .fillna(0.0)
+    df["posicao_visao_geral_identificada"] = (
+        df["posicao_visao_geral_identificada"].eq(True)
+    )
+
+    # B5 ausente equivale a nenhum estoque bloqueado observado.
+    df["saldo_pt02_b5"] = pd.to_numeric(
+        df["saldo_pt02_b5"],
+        errors="coerce",
+    ).fillna(0.0)
+
+    # Para a operação preventiva, F5 ausente é tratado como zero. Mantemos uma
+    # coluna booleana e um diagnóstico textual para revelar que houve
+    # inferência, e não leitura explícita do saldo.
+    df["saldo_pt02_f5_inferido"] = (
+        ~df["f5_identificado"]
+    )
+
+    df["saldo_pt02_f5"] = pd.to_numeric(
+        df["saldo_pt02_f5"],
+        errors="coerce",
+    ).fillna(0.0)
+
+    df["status_saldo_pt02"] = df.apply(
+        _classificar_origem_saldo_pt02,
+        axis=1,
     )
 
     # --------------------------------------------------------
@@ -330,8 +373,32 @@ def calcular_radar_ressuprimento_pt02(
     )
 
     # --------------------------------------------------------
-    # 6. Necessidade teórica até MAX
+    # 6. Média mensal da janela móvel
     # --------------------------------------------------------
+    # carregar_demanda_material já limita os movimentos entre a maior data
+    # disponível na MB51 e os seis meses anteriores. Neste ponto dividimos o
+    # total líquido pelo número de meses solicitado.
+
+    df["media_mensal_saida"] = (
+        df["demanda_relevante"]
+        / float(meses)
+    )
+
+    # --------------------------------------------------------
+    # 7. Necessidade de ressuprimento pela demanda
+    # --------------------------------------------------------
+    # O saldo operacional já contém o valor informado ou zero inferido. Dessa
+    # forma, todas as PT02 definitivas participam do mesmo cálculo.
+    df["necessidade_ressuprimento"] = (
+        df["media_mensal_saida"]
+        - df["saldo_pt02_f5"]
+    ).clip(lower=0)
+
+    # --------------------------------------------------------
+    # 8. Diagnóstico teórico até o MAX
+    # --------------------------------------------------------
+    # Este cálculo anterior é preservado como informação complementar para a
+    # futura parametrização. Ele não decide mais se existe necessidade.
 
     df["necessidade_ate_max"] = pd.NA
 
@@ -355,16 +422,21 @@ def calcular_radar_ressuprimento_pt02(
     ).clip(lower=0)
 
     # --------------------------------------------------------
-    # 7. Status operacional
+    # 9. Diagnóstico de parametrização e status operacional
     # --------------------------------------------------------
 
+    df["status_parametrizacao_pt02"] = df.apply(
+        _classificar_parametrizacao_pt02,
+        axis=1,
+    )
+
     df["status_operacional"] = df.apply(
-        _classificar_status,
+        _classificar_status_operacional,
         axis=1,
     )
 
     # --------------------------------------------------------
-    # 8. Quantidade sugerida
+    # 10. Quantidade sugerida
     # --------------------------------------------------------
 
     df["quantidade_sugerida"] = 0.0
@@ -385,7 +457,7 @@ def calcular_radar_ressuprimento_pt02(
         df.loc[
             mascara_ressuprir,
             [
-                "necessidade_ate_max",
+                "necessidade_ressuprimento",
                 "saldo_t001_f5",
             ],
         ]
@@ -394,7 +466,7 @@ def calcular_radar_ressuprimento_pt02(
     )
 
     # --------------------------------------------------------
-    # 9. Diagnósticos de origem
+    # 11. Diagnósticos de origem
     # --------------------------------------------------------
 
     df["possui_t001"] = (
@@ -414,19 +486,15 @@ def calcular_radar_ressuprimento_pt02(
     )
 
     # --------------------------------------------------------
-    # 10. Prioridade de exibição
+    # 12. Prioridade de exibição
     # --------------------------------------------------------
 
     ordem_status = {
         "RESSUPRIR": 1,
         "RESSUPRIR PARCIAL": 1,
         "SEM SALDO T001": 1,
-        "PARÂMETROS MIN/MAX INVÁLIDOS": 2,
-        "PARÂMETROS MIN/MAX A REVISAR": 2,
-        "SALDO PT02 NÃO IDENTIFICADO": 3,
-        "PARAMETRIZAÇÃO PENDENTE": 4,
-        "PARAMETRIZAÇÃO INCOMPLETA": 4,
-        "SEM NECESSIDADE": 5,
+        "SALDO PT02 NÃO IDENTIFICADO": 2,
+        "SEM NECESSIDADE": 3,
     }
 
     df["_ordem_status"] = (
@@ -438,11 +506,13 @@ def calcular_radar_ressuprimento_pt02(
     df = df.sort_values(
         by=[
             "_ordem_status",
-            "demanda_relevante",
+            "media_mensal_saida",
+            "necessidade_ressuprimento",
             "material",
         ],
         ascending=[
             True,
+            False,
             False,
             True,
         ],
@@ -453,11 +523,23 @@ def calcular_radar_ressuprimento_pt02(
     )
 
     # --------------------------------------------------------
-    # 11. Indicadores de auditoria
+    # 13. Indicadores de auditoria
     # --------------------------------------------------------
 
-    contagem_status = (
+    contagem_status_operacional = (
         df["status_operacional"]
+        .value_counts()
+        .to_dict()
+    )
+
+    contagem_status_parametrizacao = (
+        df["status_parametrizacao_pt02"]
+        .value_counts()
+        .to_dict()
+    )
+
+    contagem_status_saldo_pt02 = (
+        df["status_saldo_pt02"]
         .value_counts()
         .to_dict()
     )
@@ -467,7 +549,14 @@ def calcular_radar_ressuprimento_pt02(
         "data_referencia_demanda": data_referencia,
         "meses_demanda": meses,
         "pt02_definitivas": len(df),
-        "status": contagem_status,
+        # Mantemos status como alias do indicador anterior para não quebrar
+        # consumidores existentes durante a evolução controlada da interface.
+        "status": contagem_status_operacional,
+        "status_operacional": contagem_status_operacional,
+        "status_parametrizacao_pt02": (
+            contagem_status_parametrizacao
+        ),
+        "status_saldo_pt02": contagem_status_saldo_pt02,
     }
 
     return df, indicadores

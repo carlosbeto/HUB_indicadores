@@ -186,6 +186,14 @@ def render_ressuprimento_pt02(
     total_necessidade = int(
         (radar["necessidade_ressuprimento"] > 0).sum()
     )
+    total_acoes = (
+        contagem_status.get("RESSUPRIR", 0)
+        + contagem_status.get("RESSUPRIR PARCIAL", 0)
+    )
+    total_riscos_pcp = (
+        contagem_status.get("SEM SALDO T001", 0)
+        + contagem_status.get("RESSUPRIR PARCIAL", 0)
+    )
 
     st.caption(
         "Janela móvel da demanda: "
@@ -199,8 +207,8 @@ def render_ressuprimento_pt02(
     )
 
     coluna_total.metric(
-        "Com necessidade",
-        total_necessidade,
+        "Ações possíveis",
+        total_acoes,
     )
     coluna_completo.metric(
         "Ressuprir",
@@ -211,14 +219,20 @@ def render_ressuprimento_pt02(
         contagem_status.get("RESSUPRIR PARCIAL", 0),
     )
     coluna_sem_saldo.metric(
-        "Sem saldo T001",
-        contagem_status.get("SEM SALDO T001", 0),
+        "Encaminhados ao PCP",
+        total_riscos_pcp,
+    )
+
+    st.caption(
+        f"O radar identificou {total_necessidade} materiais com necessidade. "
+        f"Destes, {total_acoes} permitem ação do abastecedor e "
+        f"{total_riscos_pcp} possuem risco total ou residual para o PCP."
     )
 
     st.subheader("Fila de prioridades")
     st.caption(
-        "A ordem é definida pela maior média mensal de demanda. Saldo "
-        "zerado e MIN/MAX pendentes são alertas e não mudam a prioridade."
+        "Esta fila contém somente ressuprimentos completos ou parciais que "
+        "podem ser executados. A ordem é definida pela demanda."
     )
 
     limite = st.slider(

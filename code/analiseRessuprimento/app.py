@@ -5,6 +5,9 @@ from repositories.usuario_repository import (
     obter_usuario_por_matricula,
 )
 from ui.parametrizacao import render_parametrizacao
+from ui.risco_abastecimento_pcp import (
+    render_risco_abastecimento_pcp,
+)
 from ui.ressuprimento_pt02 import render_ressuprimento_pt02
 
 
@@ -59,6 +62,7 @@ def main() -> None:
             "Navegação",
             options=[
                 "Ressuprimento PT02",
+                "Risco de abastecimento — PCP",
                 "Parametrização BINMAT",
             ],
             key="pagina_analise_ressuprimento",
@@ -66,6 +70,11 @@ def main() -> None:
 
         if pagina == "Ressuprimento PT02":
             render_ressuprimento_pt02(
+                conn,
+                usuario=usuario,
+            )
+        elif pagina == "Risco de abastecimento — PCP":
+            render_risco_abastecimento_pcp(
                 conn,
                 usuario=usuario,
             )

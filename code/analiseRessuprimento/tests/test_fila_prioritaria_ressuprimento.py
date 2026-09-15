@@ -14,6 +14,7 @@ import pandas as pd
 
 from services.radar_ressuprimento_service import (
     preparar_fila_prioritaria,
+    preparar_fila_risco_pcp,
 )
 
 
@@ -33,6 +34,13 @@ class TestFilaPrioritariaRessuprimento(unittest.TestCase):
                     "necessidade_ressuprimento": float(
                         36 - prioridade
                     ),
+                    "necessidade_operacional": float(
+                        36 - prioridade
+                    ),
+                    "quantidade_sugerida": float(
+                        36 - prioridade
+                    ),
+                    "status_operacional": "RESSUPRIR",
                     "prioridade_urgencia": prioridade,
                 }
             )
@@ -42,6 +50,9 @@ class TestFilaPrioritariaRessuprimento(unittest.TestCase):
                 {
                     "material": f"{indice:07d}",
                     "necessidade_ressuprimento": 0.0,
+                    "necessidade_operacional": 0.0,
+                    "quantidade_sugerida": 0.0,
+                    "status_operacional": "SEM NECESSIDADE",
                     "prioridade_urgencia": pd.NA,
                 }
             )
@@ -95,6 +106,88 @@ class TestFilaPrioritariaRessuprimento(unittest.TestCase):
                 self._criar_radar(),
                 limite=0,
             )
+
+    def test_abastecedor_recebe_completo_e_parcial(self) -> None:
+        """A fila física contém somente transferências que podem ocorrer."""
+
+        radar = pd.DataFrame(
+            [
+                {
+                    "material": "1000001",
+                    "necessidade_ressuprimento": 100.0,
+                    "necessidade_operacional": 100.0,
+                    "quantidade_sugerida": 0.0,
+                    "status_operacional": "SEM SALDO T001",
+                },
+                {
+                    "material": "1000002",
+                    "necessidade_ressuprimento": 80.0,
+                    "necessidade_operacional": 80.0,
+                    "quantidade_sugerida": 30.0,
+                    "status_operacional": "RESSUPRIR PARCIAL",
+                },
+                {
+                    "material": "1000003",
+                    "necessidade_ressuprimento": 60.0,
+                    "necessidade_operacional": 60.0,
+                    "quantidade_sugerida": 60.0,
+                    "status_operacional": "RESSUPRIR",
+                },
+            ]
+        )
+
+        fila = preparar_fila_prioritaria(
+            radar,
+            limite=10,
+        )
+
+        self.assertEqual(
+            fila["material"].tolist(),
+            ["1000002", "1000003"],
+        )
+
+    def test_pcp_recebe_risco_integral_e_residual(self) -> None:
+        """O PCP enxerga falta total e o restante após ação parcial."""
+
+        radar = pd.DataFrame(
+            [
+                {
+                    "material": "1000001",
+                    "necessidade_ressuprimento": 100.0,
+                    "necessidade_operacional": 100.0,
+                    "quantidade_sugerida": 0.0,
+                    "status_operacional": "SEM SALDO T001",
+                },
+                {
+                    "material": "1000002",
+                    "necessidade_ressuprimento": 80.0,
+                    "necessidade_operacional": 80.0,
+                    "quantidade_sugerida": 30.0,
+                    "status_operacional": "RESSUPRIR PARCIAL",
+                },
+                {
+                    "material": "1000003",
+                    "necessidade_ressuprimento": 60.0,
+                    "necessidade_operacional": 60.0,
+                    "quantidade_sugerida": 60.0,
+                    "status_operacional": "RESSUPRIR",
+                },
+            ]
+        )
+
+        fila = preparar_fila_risco_pcp(
+            radar,
+            limite=10,
+        )
+
+        self.assertEqual(
+            fila["material"].tolist(),
+            ["1000001", "1000002"],
+        )
+        self.assertEqual(
+            fila["quantidade_risco_pcp"].tolist(),
+            [100.0, 50.0],
+        )
 
 
 if __name__ == "__main__":

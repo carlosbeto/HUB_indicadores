@@ -440,6 +440,71 @@ class TestRessuprimentoPt02(unittest.TestCase):
             "RESSUPRIR PARCIAL",
         )
 
+    def test_arredonda_necessidade_discreta_para_cima(self) -> None:
+        """Uma fração de PEÇ exige a próxima unidade física inteira."""
+
+        # Demanda 63 / 6 = média 10,5. Com 4 peças na PT02, a diferença
+        # analítica é 6,5, mas a ação necessária para cobrir a média é 7.
+        resultado, _ = self._calcular(
+            demanda=self._criar_demanda(
+                comercial=63.0,
+                tecnica=0.0,
+                umb="PEÇ",
+            ),
+            saldo_pt02=self._criar_saldo_pt02(
+                saldo_f5=4.0,
+            ),
+        )
+        item = resultado.iloc[0]
+
+        self.assertEqual(item["necessidade_ressuprimento"], 6.5)
+        self.assertEqual(item["necessidade_operacional"], 7.0)
+        self.assertEqual(item["quantidade_sugerida"], 7.0)
+
+    def test_saldo_discreto_insuficiente_gera_parcial(self) -> None:
+        """Se faltam 7 PEÇ e a T001 possui 6, a sugestão é parcial."""
+
+        resultado, _ = self._calcular(
+            demanda=self._criar_demanda(
+                comercial=63.0,
+                tecnica=0.0,
+                umb="PEÇ",
+            ),
+            saldo_pt02=self._criar_saldo_pt02(
+                saldo_f5=4.0,
+            ),
+            saldo_t001=self._criar_saldo_t001(
+                saldo_f5=6.0,
+            ),
+        )
+        item = resultado.iloc[0]
+
+        self.assertEqual(item["necessidade_operacional"], 7.0)
+        self.assertEqual(item["quantidade_sugerida"], 6.0)
+        self.assertEqual(
+            item["status_operacional"],
+            "RESSUPRIR PARCIAL",
+        )
+
+    def test_unidade_fracionavel_preserva_casas_decimais(self) -> None:
+        """Grandezas como grama não devem ser arredondadas para inteiros."""
+
+        resultado, _ = self._calcular(
+            demanda=self._criar_demanda(
+                comercial=63.0,
+                tecnica=0.0,
+                umb="G",
+            ),
+            saldo_pt02=self._criar_saldo_pt02(
+                saldo_f5=4.0,
+            ),
+        )
+        item = resultado.iloc[0]
+
+        self.assertEqual(item["necessidade_ressuprimento"], 6.5)
+        self.assertEqual(item["necessidade_operacional"], 6.5)
+        self.assertEqual(item["quantidade_sugerida"], 6.5)
+
     def test_informa_necessidade_quando_t001_nao_possui_saldo(self) -> None:
         """A ausência na origem não elimina o risco existente no picking."""
 

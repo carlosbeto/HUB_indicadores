@@ -2,6 +2,7 @@ from __future__ import annotations
 
 # Versão de entrega: 2026-09-14, incluindo saldos F5 inferidos.
 
+import math
 import sqlite3
 
 import pandas as pd
@@ -25,6 +26,20 @@ POSICOES_TRANSICAO = {
 
 TIPO_ESTOQUE_LIVRE = "F5"
 TIPO_ESTOQUE_BLOQUEADO = "B5"
+
+# Essas unidades representam objetos ou embalagens movimentados como unidades
+# completas. A lista fica explícita para impedir que uma nova UMB seja
+# arredondada sem antes passar por validação da regra de negócio.
+UNIDADES_DISCRETAS = {
+    "PEÇ",
+    "PAC",
+    "PAR",
+    "UN",
+    "CDA",
+    "ROL",
+    # PC pode aparecer como contingência da unidade cadastrada na BINMAT.
+    "PC",
+}
 
 
 # ============================================================
@@ -165,17 +180,15 @@ def _classificar_status_operacional(
     MIN/MAX também exigem manutenção.
     """
 
-    necessidade = float(
-        linha["necessidade_ressuprimento"]
-    )
+    # A decisão física usa a necessidade operacional. A diferença analítica
+    # continua disponível em necessidade_ressuprimento para auditoria.
+    necessidade = float(linha["necessidade_operacional"])
 
     # Saldo igual ou superior à média mensal produz necessidade zero.
     if necessidade <= 0:
         return "SEM NECESSIDADE"
 
-    saldo_t001 = float(
-        linha["saldo_t001_f5"]
-    )
+    saldo_t001 = float(linha["saldo_t001_operacional"])
 
     if saldo_t001 <= 0:
         return "SEM SALDO T001"
@@ -184,6 +197,34 @@ def _classificar_status_operacional(
         return "RESSUPRIR PARCIAL"
 
     return "RESSUPRIR"
+
+
+def _calcular_necessidade_operacional(
+    linha: pd.Series,
+) -> float:
+    """Converte a diferença analítica em quantidade física movimentável."""
+
+    necessidade = float(linha["necessidade_ressuprimento"])
+    unidade = linha["unidade_operacional"]
+
+    if pd.notna(unidade) and str(unidade).strip().upper() in UNIDADES_DISCRETAS:
+        return float(math.ceil(necessidade))
+
+    return necessidade
+
+
+def _calcular_saldo_t001_operacional(
+    linha: pd.Series,
+) -> float:
+    """Limita o saldo discreto às unidades inteiras realmente disponíveis."""
+
+    saldo = max(float(linha["saldo_t001_f5"]), 0.0)
+    unidade = linha["unidade_operacional"]
+
+    if pd.notna(unidade) and str(unidade).strip().upper() in UNIDADES_DISCRETAS:
+        return float(math.floor(saldo))
+
+    return saldo
 
 
 def _classificar_origem_saldo_pt02(
@@ -460,6 +501,18 @@ def calcular_radar_ressuprimento_pt02(
         - df["saldo_pt02_f5"]
     ).clip(lower=0)
 
+    # A diferença acima é matemática e pode conter frações resultantes da
+    # média. A ação abaixo respeita se a UMB permite ou não fracionamento.
+    df["necessidade_operacional"] = df.apply(
+        _calcular_necessidade_operacional,
+        axis=1,
+    )
+
+    df["saldo_t001_operacional"] = df.apply(
+        _calcular_saldo_t001_operacional,
+        axis=1,
+    )
+
     # --------------------------------------------------------
     # 8. Diagnóstico teórico até o MAX
     # --------------------------------------------------------
@@ -523,8 +576,8 @@ def calcular_radar_ressuprimento_pt02(
         df.loc[
             mascara_ressuprir,
             [
-                "necessidade_ressuprimento",
-                "saldo_t001_f5",
+                "necessidade_operacional",
+                "saldo_t001_operacional",
             ],
         ]
         .astype(float)

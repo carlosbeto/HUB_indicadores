@@ -342,6 +342,85 @@ class TestRessuprimentoPt02(unittest.TestCase):
         self.assertEqual(item["quantidade_sugerida"], 0.0)
         self.assertEqual(item["status_operacional"], "SEM NECESSIDADE")
 
+    def test_prioriza_maior_demanda_sem_ocultar_picking_zerado(self) -> None:
+        """A demanda define a ordem e o saldo zerado permanece visível."""
+
+        # O material 1000001 movimenta muito mais e, por isso, deve aparecer
+        # primeiro. O material 1000002 está zerado e continua na fila como
+        # alerta, mas esse fato não substitui a demanda como prioridade.
+        posicoes = pd.concat(
+            [
+                self._criar_posicao(
+                    material="1000001",
+                    posicao="PT02-001-001-001",
+                ),
+                self._criar_posicao(
+                    material="1000002",
+                    posicao="PT02-001-003-001",
+                ),
+            ],
+            ignore_index=True,
+        )
+
+        saldo_pt02 = pd.concat(
+            [
+                self._criar_saldo_pt02(
+                    material="1000001",
+                    posicao="PT02-001-001-001",
+                    saldo_f5=900.0,
+                ),
+                self._criar_saldo_pt02(
+                    material="1000002",
+                    posicao="PT02-001-003-001",
+                    saldo_f5=0.0,
+                ),
+            ],
+            ignore_index=True,
+        )
+
+        saldo_t001 = pd.concat(
+            [
+                self._criar_saldo_t001(
+                    material="1000001",
+                    saldo_f5=500.0,
+                ),
+                self._criar_saldo_t001(
+                    material="1000002",
+                    saldo_f5=500.0,
+                ),
+            ],
+            ignore_index=True,
+        )
+
+        demanda = pd.concat(
+            [
+                self._criar_demanda(
+                    material="1000001",
+                    comercial=6000.0,
+                    tecnica=0.0,
+                ),
+                self._criar_demanda(
+                    material="1000002",
+                    comercial=120.0,
+                    tecnica=0.0,
+                ),
+            ],
+            ignore_index=True,
+        )
+
+        resultado, _ = self._calcular(
+            posicoes=posicoes,
+            saldo_pt02=saldo_pt02,
+            saldo_t001=saldo_t001,
+            demanda=demanda,
+        )
+
+        self.assertEqual(resultado.iloc[0]["material"], "1000001")
+        self.assertEqual(resultado.iloc[0]["media_mensal_saida"], 1000.0)
+        self.assertEqual(resultado.iloc[1]["material"], "1000002")
+        self.assertEqual(resultado.iloc[1]["saldo_pt02_f5"], 0.0)
+        self.assertEqual(resultado.iloc[1]["status_operacional"], "RESSUPRIR")
+
     def test_limita_sugestao_quando_t001_possui_saldo_parcial(self) -> None:
         """Necessidade 6 com apenas 3 na origem sugere transferência de 3."""
 

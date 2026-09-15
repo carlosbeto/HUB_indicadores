@@ -205,6 +205,31 @@ def _classificar_origem_saldo_pt02(
     return "AUSENTE NA VISAO GERAL - F5 ASSUMIDO ZERO"
 
 
+def _definir_unidade_operacional(
+    linha: pd.Series,
+) -> tuple[object, str]:
+    """Escolhe a unidade que acompanha as quantidades do radar.
+
+    A UMB do MB51 tem prioridade porque é a unidade da quantidade usada no
+    cálculo da demanda. A unidade da BINMAT é uma contingência somente quando
+    a MB51 não a informou. Havendo conflito histórico na MB51, nenhuma
+    unidade é escolhida silenciosamente.
+    """
+
+    if linha["status_umb"] == "UMB CONFLITANTE":
+        return pd.NA, "CONFLITO MB51"
+
+    umb = linha["unidade_medida_basica"]
+    if pd.notna(umb) and str(umb).strip():
+        return str(umb).strip(), "MB51 - UMB"
+
+    unidade_binmat = linha["unidade_medida"]
+    if pd.notna(unidade_binmat) and str(unidade_binmat).strip():
+        return str(unidade_binmat).strip(), "BINMAT"
+
+    return pd.NA, "NÃO INFORMADA"
+
+
 # ============================================================
 # RADAR OPERACIONAL
 # ============================================================
@@ -356,6 +381,47 @@ def calcular_radar_ressuprimento_pt02(
         how="left",
         validate="one_to_one",
     )
+
+    # DataFrames simulados por integrações antigas podem ainda não carregar
+    # os três campos da migration 003. Os valores abaixo preservam o contrato
+    # anterior e permitem a contingência pela unidade da BINMAT.
+    if "unidade_medida_basica" not in df.columns:
+        df["unidade_medida_basica"] = pd.NA
+
+    if "quantidade_umb_distintas" not in df.columns:
+        df["quantidade_umb_distintas"] = 0
+
+    if "status_umb" not in df.columns:
+        df["status_umb"] = "UMB NÃO INFORMADA"
+
+    df["quantidade_umb_distintas"] = pd.to_numeric(
+        df["quantidade_umb_distintas"],
+        errors="coerce",
+    ).fillna(0).astype(int)
+
+    # A unidade é definida antes dos cálculos para deixar explícito que os
+    # números permanecem na unidade base; não existe arredondamento aqui.
+    if df.empty:
+        # Mesmo sem PT02 definitiva, o retorno preserva todas as colunas do
+        # contrato. Isso evita tratamento especial nos consumidores do radar.
+        df["unidade_operacional"] = pd.Series(dtype="object")
+        df["origem_unidade_operacional"] = pd.Series(dtype="object")
+    else:
+        unidades = df.apply(
+            _definir_unidade_operacional,
+            axis=1,
+            result_type="expand",
+        )
+        unidades.columns = [
+            "unidade_operacional",
+            "origem_unidade_operacional",
+        ]
+        df[
+            [
+                "unidade_operacional",
+                "origem_unidade_operacional",
+            ]
+        ] = unidades
 
     colunas_demanda = [
         "qtd_601",
@@ -544,6 +610,18 @@ def calcular_radar_ressuprimento_pt02(
         .to_dict()
     )
 
+    contagem_status_umb = (
+        df["status_umb"]
+        .value_counts()
+        .to_dict()
+    )
+
+    contagem_origem_unidade = (
+        df["origem_unidade_operacional"]
+        .value_counts()
+        .to_dict()
+    )
+
     indicadores = {
         "data_inicio_demanda": data_inicio,
         "data_referencia_demanda": data_referencia,
@@ -557,6 +635,8 @@ def calcular_radar_ressuprimento_pt02(
             contagem_status_parametrizacao
         ),
         "status_saldo_pt02": contagem_status_saldo_pt02,
+        "status_umb": contagem_status_umb,
+        "origem_unidade_operacional": contagem_origem_unidade,
     }
 
     return df, indicadores

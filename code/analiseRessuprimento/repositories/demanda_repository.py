@@ -25,6 +25,25 @@ DEBITO_CREDITO_ESPERADO = {
 }
 
 
+def _possui_coluna_umb(
+    conn: sqlite3.Connection,
+) -> bool:
+    """Informa se o banco já recebeu a migration 003.
+
+    A verificação mantém o repository compatível com bancos temporários e
+    cópias antigas usados pelos testes, sem esconder a UMB quando ela existe.
+    """
+
+    colunas = conn.execute(
+        "PRAGMA table_info(fact_mb51_movimentos)"
+    ).fetchall()
+
+    return any(
+        coluna[1] == "unidade_medida_basica"
+        for coluna in colunas
+    )
+
+
 # ============================================================
 # DATA DE REFERÊNCIA
 # ============================================================
@@ -132,9 +151,36 @@ def carregar_demanda_material(
         meses,
     )
 
-    sql = """
+    # A UMB pertence ao movimento cuja quantidade é somada. Uma unidade só é
+    # considerada operacional quando todas as linhas relevantes do material
+    # concordam. Um conflito precisa permanecer visível para análise humana.
+    if _possui_coluna_umb(conn):
+        selecao_umb = """
+            COUNT(
+                DISTINCT NULLIF(
+                    TRIM(unidade_medida_basica),
+                    ''
+                )
+            ) AS quantidade_umb_distintas,
+
+            MIN(
+                NULLIF(
+                    TRIM(unidade_medida_basica),
+                    ''
+                )
+            ) AS unidade_medida_basica,
+        """
+    else:
+        selecao_umb = """
+            0 AS quantidade_umb_distintas,
+            NULL AS unidade_medida_basica,
+        """
+
+    sql = f"""
         SELECT
             material,
+
+            {selecao_umb}
 
             SUM(
                 CASE
@@ -222,6 +268,29 @@ def carregar_demanda_material(
         .fillna(0.0)
         .astype(float)
     )
+
+    df["quantidade_umb_distintas"] = pd.to_numeric(
+        df["quantidade_umb_distintas"],
+        errors="coerce",
+    ).fillna(0).astype(int)
+
+    # MIN() serve apenas para recuperar a unidade quando existe exatamente
+    # uma opção. No conflito, descartamos esse valor para não eleger uma UMB
+    # arbitrariamente.
+    df.loc[
+        df["quantidade_umb_distintas"] != 1,
+        "unidade_medida_basica",
+    ] = pd.NA
+
+    df["status_umb"] = "UMB NÃO INFORMADA"
+    df.loc[
+        df["quantidade_umb_distintas"] == 1,
+        "status_umb",
+    ] = "UMB CONSISTENTE"
+    df.loc[
+        df["quantidade_umb_distintas"] > 1,
+        "status_umb",
+    ] = "UMB CONFLITANTE"
 
     df["demanda_comercial"] = (
         df["qtd_601"]

@@ -163,6 +163,9 @@ class TestRessuprimentoPt02(unittest.TestCase):
         material: str = "1000001",
         comercial: float = 48.0,
         tecnica: float = 12.0,
+        umb: str | None = "PEÇ",
+        quantidade_umb_distintas: int = 1,
+        status_umb: str = "UMB CONSISTENTE",
     ) -> pd.DataFrame:
         """Monta a demanda líquida mantendo comercial e técnica separadas."""
 
@@ -179,6 +182,9 @@ class TestRessuprimentoPt02(unittest.TestCase):
                     "demanda_comercial": comercial,
                     "demanda_tecnica": tecnica,
                     "demanda_relevante": comercial + tecnica,
+                    "unidade_medida_basica": umb,
+                    "quantidade_umb_distintas": quantidade_umb_distintas,
+                    "status_umb": status_umb,
                 }
             ]
         )
@@ -286,6 +292,38 @@ class TestRessuprimentoPt02(unittest.TestCase):
         self.assertEqual(
             item["status_parametrizacao_pt02"],
             "PARAMETRIZAÇÃO PENDENTE",
+        )
+
+    def test_umb_do_mb51_define_unidade_operacional(self) -> None:
+        """A unidade da quantidade demandada prevalece sobre a BINMAT."""
+
+        resultado, _ = self._calcular()
+        item = resultado.iloc[0]
+
+        # A posição simulada informa PC, enquanto a quantidade histórica do
+        # MB51 está em PEÇ. Como a necessidade nasce da quantidade do MB51,
+        # sua UMB é a referência operacional correta.
+        self.assertEqual(item["unidade_medida"], "PC")
+        self.assertEqual(item["unidade_medida_basica"], "PEÇ")
+        self.assertEqual(item["unidade_operacional"], "PEÇ")
+        self.assertEqual(item["origem_unidade_operacional"], "MB51 - UMB")
+
+    def test_conflito_de_umb_nao_e_ocultado_pela_binmat(self) -> None:
+        """Um conflito no MB51 permanece visível, mesmo havendo unidade SAP."""
+
+        demanda = self._criar_demanda(
+            umb=None,
+            quantidade_umb_distintas=2,
+            status_umb="UMB CONFLITANTE",
+        )
+
+        resultado, _ = self._calcular(demanda=demanda)
+        item = resultado.iloc[0]
+
+        self.assertTrue(pd.isna(item["unidade_operacional"]))
+        self.assertEqual(
+            item["origem_unidade_operacional"],
+            "CONFLITO MB51",
         )
 
     def test_saldo_igual_a_media_mensal_nao_gera_necessidade(self) -> None:

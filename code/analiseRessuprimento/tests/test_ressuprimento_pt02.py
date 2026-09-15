@@ -294,6 +294,53 @@ class TestRessuprimentoPt02(unittest.TestCase):
             "PARAMETRIZAÇÃO PENDENTE",
         )
 
+    def test_alerta_quando_saldo_fisico_pt02_supera_maximo(self) -> None:
+        """F5 + B5 acima do MAX revela parâmetro incompatível com a posição."""
+
+        # A posição possui parâmetros formalmente válidos, porém a fotografia
+        # física mostra 8 unidades livres e 3 bloqueadas. Como 11 supera o MAX
+        # cadastrado de 10, a BINMAT deve ser revisada pelo controlador.
+        resultado, _ = self._calcular(
+            posicoes=self._criar_posicao(
+                minimo=1.0,
+                maximo=10.0,
+            ),
+            saldo_pt02=self._criar_saldo_pt02(
+                saldo_f5=8.0,
+                saldo_b5=3.0,
+            ),
+        )
+        item = resultado.iloc[0]
+
+        self.assertEqual(item["saldo_pt02_fisico"], 11.0)
+        self.assertEqual(
+            item["status_parametrizacao_pt02"],
+            "REVISAR MIN/MAX — SALDO ACIMA DO MAX",
+        )
+
+    def test_saldo_fisico_igual_ao_maximo_permanece_parametrizado(
+        self,
+    ) -> None:
+        """O alerta só ocorre quando o saldo físico ultrapassa o MAX."""
+
+        resultado, _ = self._calcular(
+            posicoes=self._criar_posicao(
+                minimo=1.0,
+                maximo=10.0,
+            ),
+            saldo_pt02=self._criar_saldo_pt02(
+                saldo_f5=8.0,
+                saldo_b5=2.0,
+            ),
+        )
+        item = resultado.iloc[0]
+
+        self.assertEqual(item["saldo_pt02_fisico"], 10.0)
+        self.assertEqual(
+            item["status_parametrizacao_pt02"],
+            "PARAMETRIZADA",
+        )
+
     def test_umb_do_mb51_define_unidade_operacional(self) -> None:
         """A unidade da quantidade demandada prevalece sobre a BINMAT."""
 
@@ -458,6 +505,7 @@ class TestRessuprimentoPt02(unittest.TestCase):
         item = resultado.iloc[0]
 
         self.assertEqual(item["necessidade_ressuprimento"], 6.5)
+        self.assertEqual(item["media_mensal_operacional"], 11.0)
         self.assertEqual(item["necessidade_operacional"], 7.0)
         self.assertEqual(item["quantidade_sugerida"], 7.0)
 
@@ -502,6 +550,7 @@ class TestRessuprimentoPt02(unittest.TestCase):
         item = resultado.iloc[0]
 
         self.assertEqual(item["necessidade_ressuprimento"], 6.5)
+        self.assertEqual(item["media_mensal_operacional"], 10.5)
         self.assertEqual(item["necessidade_operacional"], 6.5)
         self.assertEqual(item["quantidade_sugerida"], 6.5)
 

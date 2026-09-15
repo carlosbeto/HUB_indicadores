@@ -163,6 +163,13 @@ def _classificar_parametrizacao_pt02(
     if maximo == minimo:
         return "PARÂMETROS MIN/MAX A REVISAR"
 
+    # F5 representa o estoque livre e B5 o estoque bloqueado. Embora apenas
+    # F5 possa abastecer a operação, ambos ocupam fisicamente a posição PT02.
+    # Ultrapassar o MAX cadastrado demonstra que o parâmetro não representa a
+    # capacidade atualmente observada e deve ser revisado pelo controlador.
+    if linha["saldo_pt02_fisico"] > maximo:
+        return "REVISAR MIN/MAX — SALDO ACIMA DO MAX"
+
     return "PARAMETRIZADA"
 
 
@@ -211,6 +218,25 @@ def _calcular_necessidade_operacional(
         return float(math.ceil(necessidade))
 
     return necessidade
+
+
+def _calcular_media_mensal_operacional(
+    linha: pd.Series,
+) -> float:
+    """Converte a média analítica em quantidade física apresentável.
+
+    Materiais discretos não podem ser planejados em frações e, por prudência,
+    são arredondados para cima. Grandezas fracionáveis preservam o valor real.
+    A média analítica continua disponível e define a ordem de prioridade.
+    """
+
+    media = float(linha["media_mensal_saida"])
+    unidade = linha["unidade_operacional"]
+
+    if pd.notna(unidade) and str(unidade).strip().upper() in UNIDADES_DISCRETAS:
+        return float(math.ceil(media))
+
+    return media
 
 
 def _calcular_saldo_t001_operacional(
@@ -384,6 +410,14 @@ def calcular_radar_ressuprimento_pt02(
         errors="coerce",
     ).fillna(0.0)
 
+    # O saldo físico é um diagnóstico de ocupação da posição. Ele não é saldo
+    # disponível para transferência e não participa do cálculo da necessidade.
+    # Sua finalidade é comparar a ocupação observada com o MAX da BINMAT.
+    df["saldo_pt02_fisico"] = (
+        df["saldo_pt02_f5"]
+        + df["saldo_pt02_b5"]
+    )
+
     df["status_saldo_pt02"] = df.apply(
         _classificar_origem_saldo_pt02,
         axis=1,
@@ -489,6 +523,13 @@ def calcular_radar_ressuprimento_pt02(
     df["media_mensal_saida"] = (
         df["demanda_relevante"]
         / float(meses)
+    )
+
+    # A coluna operacional atende à leitura física da tela sem apagar a média
+    # analítica, que permanece disponível para auditoria e priorização.
+    df["media_mensal_operacional"] = df.apply(
+        _calcular_media_mensal_operacional,
+        axis=1,
     )
 
     # --------------------------------------------------------

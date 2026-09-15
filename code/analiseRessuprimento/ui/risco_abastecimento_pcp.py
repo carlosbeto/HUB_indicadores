@@ -30,7 +30,7 @@ COLUNAS_RISCO_PCP = {
     "material": "Material",
     "descricao_material": "Descrição",
     "posicao": "Posição PT02",
-    "media_mensal_saida": "Média mensal",
+    "media_mensal_operacional": "Média mensal",
     "saldo_pt02_f5": "Saldo PT02 F5",
     "necessidade_operacional": "Necessidade",
     "saldo_t001_f5": "Saldo T001 F5",
@@ -53,9 +53,13 @@ def _formatar_fila_pcp(
         .copy()
     )
 
-    exibicao["Média mensal"] = exibicao[
-        "Média mensal"
-    ].map(_formatar_numero_br)
+    exibicao["Média mensal"] = exibicao.apply(
+        lambda linha: _formatar_numero_operacional_br(
+            linha["Média mensal"],
+            linha["UMB"],
+        ),
+        axis=1,
+    )
 
     for coluna in [
         "Saldo PT02 F5",

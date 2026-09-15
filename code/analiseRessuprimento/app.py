@@ -5,6 +5,7 @@ from repositories.usuario_repository import (
     obter_usuario_por_matricula,
 )
 from ui.parametrizacao import render_parametrizacao
+from ui.ressuprimento_pt02 import render_ressuprimento_pt02
 
 
 ID_PLANO_INICIAL = 1
@@ -46,11 +47,35 @@ def main() -> None:
             )
             st.stop()
 
-        render_parametrizacao(
-            conn,
-            id_plano=ID_PLANO_INICIAL,
-            usuario=usuario,
+        # O menu separa dois processos relacionados, mas independentes:
+        # o abastecimento diário do picking e a parametrização MIN/MAX.
+        # Ressuprimento PT02 é a página inicial por ser a urgência operacional.
+        st.sidebar.title("Análise de Ressuprimento")
+        st.sidebar.caption(
+            f"{usuario['nome']} — {usuario['matricula']}"
         )
+
+        pagina = st.sidebar.radio(
+            "Navegação",
+            options=[
+                "Ressuprimento PT02",
+                "Parametrização BINMAT",
+            ],
+            key="pagina_analise_ressuprimento",
+        )
+
+        if pagina == "Ressuprimento PT02":
+            render_ressuprimento_pt02(
+                conn,
+                usuario=usuario,
+            )
+        else:
+            # A página já homologada da Wave A é preservada sem alterações.
+            render_parametrizacao(
+                conn,
+                id_plano=ID_PLANO_INICIAL,
+                usuario=usuario,
+            )
 
 
 if __name__ == "__main__":

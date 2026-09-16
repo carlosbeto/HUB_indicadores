@@ -12,7 +12,33 @@ from services.plano_parametrizacao_service import (
     ativar_plano_parametrizacao,
     liberar_tarefa,
     obter_detalhe_operacional_tarefa,
+    registrar_decisao,
+    revisar_decisao,
 )
+
+
+DECISOES_INTERFACE = {
+    "Parametrizar": "PARAMETRIZAR",
+    "Não parametrizar": "NAO_PARAMETRIZAR",
+    "Investigar": "INVESTIGAR",
+}
+
+
+def _obter_configuracao_decisao(
+    rotulo: str,
+) -> dict[str, object]:
+    """Traduz uma escolha simples da tela para o contrato do service."""
+
+    if rotulo not in DECISOES_INTERFACE:
+        raise ValueError("Opção de decisão não reconhecida.")
+
+    codigo = DECISOES_INTERFACE[rotulo]
+
+    return {
+        "codigo": codigo,
+        "solicita_min_max": codigo == "PARAMETRIZAR",
+        "solicita_justificativa": codigo != "PARAMETRIZAR",
+    }
 
 
 def _obter_acoes_tarefa(
@@ -275,6 +301,101 @@ def render_parametrizacao(
                     st.session_state[chave_mensagem_tarefa] = (
                         f"Tarefa do material {item['material']} "
                         "liberada com sucesso."
+                    )
+                    st.rerun()
+
+            # A escolha fica fora do formulário para que o Streamlit reconstrua
+            # imediatamente os campos: MIN/MAX para parametrizar ou justificativa
+            # para as demais decisões. Apenas o botão final grava no banco.
+            st.markdown("### Decisão do controlador")
+
+            rotulo_decisao = st.radio(
+                "O que deve ser feito com esta posição?",
+                options=list(DECISOES_INTERFACE),
+                horizontal=True,
+                key=f"tipo_decisao_{id_item_plano}",
+            )
+
+            configuracao = _obter_configuracao_decisao(
+                rotulo_decisao
+            )
+
+            revisao = decisao is not None
+            texto_botao = (
+                "Revisar decisão"
+                if revisao
+                else "Registrar decisão"
+            )
+
+            with st.form(
+                key=f"form_decisao_{id_item_plano}"
+            ):
+                min_proposto = None
+                max_proposto = None
+                justificativa = None
+
+                if configuracao["solicita_min_max"]:
+                    coluna_min, coluna_max = st.columns(2)
+
+                    with coluna_min:
+                        min_proposto = st.number_input(
+                            "MIN proposto",
+                            min_value=0.0,
+                            value=0.0,
+                            step=1.0,
+                            key=f"min_proposto_{id_item_plano}",
+                        )
+
+                    with coluna_max:
+                        max_proposto = st.number_input(
+                            "MAX proposto",
+                            min_value=0.0,
+                            value=0.0,
+                            step=1.0,
+                            key=f"max_proposto_{id_item_plano}",
+                        )
+
+                if configuracao["solicita_justificativa"]:
+                    justificativa = st.text_area(
+                        "Justificativa obrigatória",
+                        key=f"justificativa_{id_item_plano}",
+                    )
+
+                observacao = st.text_area(
+                    "Observação opcional",
+                    key=f"observacao_{id_item_plano}",
+                )
+
+                enviar_decisao = st.form_submit_button(
+                    texto_botao,
+                    type="primary",
+                )
+
+            if enviar_decisao:
+                argumentos = {
+                    "id_item_plano": id_item_plano,
+                    "controlador": usuario["matricula"],
+                    "decisao": configuracao["codigo"],
+                    "min_proposto": min_proposto,
+                    "max_proposto": max_proposto,
+                    "justificativa": justificativa,
+                    "observacao": observacao,
+                }
+
+                try:
+                    if revisao:
+                        revisar_decisao(conn, **argumentos)
+                    else:
+                        registrar_decisao(conn, **argumentos)
+
+                except ValueError as erro:
+                    st.error(str(erro))
+
+                else:
+                    acao = "revisada" if revisao else "registrada"
+                    st.session_state[chave_mensagem_tarefa] = (
+                        f"Decisão do material {item['material']} "
+                        f"{acao} com sucesso."
                     )
                     st.rerun()
         else:

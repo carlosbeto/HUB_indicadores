@@ -12,6 +12,7 @@ with patch.dict(
     {"streamlit": MagicMock()},
 ):
     from ui.parametrizacao import _obter_acoes_tarefa
+    from ui.parametrizacao import _obter_configuracao_decisao
 
 
 class TestUiParametrizacao(unittest.TestCase):
@@ -64,6 +65,33 @@ class TestUiParametrizacao(unittest.TestCase):
         )
 
         self.assertEqual(acoes, {"assumir": False, "liberar": False})
+
+    def test_parametrizar_solicita_min_e_max(self) -> None:
+        """A opção operacional principal não exige justificativa."""
+
+        configuracao = _obter_configuracao_decisao("Parametrizar")
+
+        self.assertEqual(configuracao["codigo"], "PARAMETRIZAR")
+        self.assertTrue(configuracao["solicita_min_max"])
+        self.assertFalse(configuracao["solicita_justificativa"])
+
+    def test_nao_parametrizar_solicita_justificativa(self) -> None:
+        """Encerrar sem parâmetros exige explicar o motivo."""
+
+        configuracao = _obter_configuracao_decisao("Não parametrizar")
+
+        self.assertEqual(configuracao["codigo"], "NAO_PARAMETRIZAR")
+        self.assertFalse(configuracao["solicita_min_max"])
+        self.assertTrue(configuracao["solicita_justificativa"])
+
+    def test_investigar_solicita_justificativa(self) -> None:
+        """A investigação registra o que ainda precisa ser esclarecido."""
+
+        configuracao = _obter_configuracao_decisao("Investigar")
+
+        self.assertEqual(configuracao["codigo"], "INVESTIGAR")
+        self.assertFalse(configuracao["solicita_min_max"])
+        self.assertTrue(configuracao["solicita_justificativa"])
 
 
 if __name__ == "__main__":

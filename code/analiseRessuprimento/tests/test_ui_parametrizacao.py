@@ -1,97 +1,88 @@
 from __future__ import annotations
 
-"""Testes das ações apresentadas pela tela de parametrização PT02."""
+"""Testes da apresentação da fila dinâmica de parametrização BINMAT."""
 
 import unittest
 from unittest.mock import MagicMock, patch
 
-# A decisão de mostrar os botões é uma função pura e não requer um servidor
-# Streamlit. A simulação permite importar a página no ambiente de testes.
-with patch.dict(
-    "sys.modules",
-    {"streamlit": MagicMock()},
-):
-    from ui.parametrizacao import _obter_acoes_tarefa
-    from ui.parametrizacao import _obter_configuracao_decisao
+import pandas as pd
+
+with patch.dict("sys.modules", {"streamlit": MagicMock()}):
+    from ui.parametrizacao import (
+        _formatar_fila_parametrizacao,
+        _gerar_csv_parametrizacao,
+    )
 
 
 class TestUiParametrizacao(unittest.TestCase):
-    """Protege a visibilidade dos primeiros comandos do workflow."""
+    """Protege a leitura e a exportação sem depender do Streamlit aberto."""
 
-    def test_item_disponivel_em_plano_ativo_pode_ser_assumido(self) -> None:
-        """Uma tarefa livre apresenta somente a ação de assumir."""
-
-        acoes = _obter_acoes_tarefa(
-            status_plano="ATIVO",
-            status_item="DISPONIVEL",
-            controlador_responsavel=None,
-            matricula_usuario="CA049341",
+    @staticmethod
+    def _criar_fila() -> pd.DataFrame:
+        return pd.DataFrame(
+            [
+                {
+                    "material": "2640092",
+                    "descricao_material": "CONVERSOR",
+                    "posicao": "PT02-002-093-001",
+                    "media_mensal_operacional": 441.0,
+                    "quantidade_minima": 1.0,
+                    "quantidade_maxima": 10.0,
+                    "saldo_pt02_f5": 52.0,
+                    "saldo_pt02_b5": 0.0,
+                    "saldo_pt02_fisico": 52.0,
+                    "unidade_operacional": "PEÇ",
+                    "status_parametrizacao_pt02": (
+                        "REVISAR MIN/MAX — SALDO ACIMA DO MAX"
+                    ),
+                }
+            ]
         )
 
-        self.assertEqual(acoes, {"assumir": True, "liberar": False})
+    def test_formata_quantidades_discretas_sem_fracao(self) -> None:
+        """A lista do controlador usa quantidades físicas inteiras."""
 
-    def test_responsavel_pode_liberar_tarefa_em_analise(self) -> None:
-        """Somente a matrícula responsável recebe o botão de liberar."""
+        exibicao = _formatar_fila_parametrizacao(self._criar_fila())
 
-        acoes = _obter_acoes_tarefa(
-            status_plano="ATIVO",
-            status_item="EM_ANALISE",
-            controlador_responsavel="CA049341",
-            matricula_usuario="CA049341",
-        )
+        self.assertEqual(exibicao.iloc[0]["Média mensal"], "441")
+        self.assertEqual(exibicao.iloc[0]["Saldo físico"], "52")
 
-        self.assertEqual(acoes, {"assumir": False, "liberar": True})
+    def test_csv_usa_separador_compativel_com_excel_pt_br(self) -> None:
+        """A exportação contém cabeçalho UTF-8 e separador ponto e vírgula."""
 
-    def test_outro_controlador_nao_pode_liberar_tarefa(self) -> None:
-        """Uma tarefa alheia fica visível, mas sem comandos de alteração."""
+        conteudo = _gerar_csv_parametrizacao(
+            self._criar_fila()
+        ).decode("utf-8-sig")
 
-        acoes = _obter_acoes_tarefa(
-            status_plano="ATIVO",
-            status_item="EM_ANALISE",
-            controlador_responsavel="AB123456",
-            matricula_usuario="CA049341",
-        )
+        self.assertIn("Material;Descrição;Posição PT02", conteudo)
+        self.assertIn("2640092;CONVERSOR;PT02-002-093-001", conteudo)
 
-        self.assertEqual(acoes, {"assumir": False, "liberar": False})
+    def test_csv_exporta_unidade_discreta_sem_fracao(self) -> None:
+        """Quantidades em peça mantêm no CSV a mesma leitura da tela."""
 
-    def test_plano_inativo_nao_apresenta_comandos(self) -> None:
-        """Nenhuma tarefa pode mudar enquanto o plano não estiver ativo."""
+        conteudo = _gerar_csv_parametrizacao(
+            self._criar_fila()
+        ).decode("utf-8-sig")
+        linha = conteudo.splitlines()[1].split(";")
 
-        acoes = _obter_acoes_tarefa(
-            status_plano="RASCUNHO",
-            status_item="DISPONIVEL",
-            controlador_responsavel=None,
-            matricula_usuario="CA049341",
-        )
+        self.assertEqual(linha[3], "441")
+        self.assertEqual(linha[4], "1")
+        self.assertEqual(linha[5], "10")
+        self.assertEqual(linha[8], "52")
 
-        self.assertEqual(acoes, {"assumir": False, "liberar": False})
+    def test_csv_preserva_fracao_em_unidade_fracionavel(self) -> None:
+        """Grandezas fracionáveis continuam com duas casas no CSV."""
 
-    def test_parametrizar_solicita_min_e_max(self) -> None:
-        """A opção operacional principal não exige justificativa."""
+        fila = self._criar_fila()
+        fila.loc[0, "unidade_operacional"] = "G"
+        fila.loc[0, "media_mensal_operacional"] = 441.25
+        fila.loc[0, "saldo_pt02_fisico"] = 52.5
 
-        configuracao = _obter_configuracao_decisao("Parametrizar")
+        conteudo = _gerar_csv_parametrizacao(fila).decode("utf-8-sig")
+        linha = conteudo.splitlines()[1].split(";")
 
-        self.assertEqual(configuracao["codigo"], "PARAMETRIZAR")
-        self.assertTrue(configuracao["solicita_min_max"])
-        self.assertFalse(configuracao["solicita_justificativa"])
-
-    def test_nao_parametrizar_solicita_justificativa(self) -> None:
-        """Encerrar sem parâmetros exige explicar o motivo."""
-
-        configuracao = _obter_configuracao_decisao("Não parametrizar")
-
-        self.assertEqual(configuracao["codigo"], "NAO_PARAMETRIZAR")
-        self.assertFalse(configuracao["solicita_min_max"])
-        self.assertTrue(configuracao["solicita_justificativa"])
-
-    def test_investigar_solicita_justificativa(self) -> None:
-        """A investigação registra o que ainda precisa ser esclarecido."""
-
-        configuracao = _obter_configuracao_decisao("Investigar")
-
-        self.assertEqual(configuracao["codigo"], "INVESTIGAR")
-        self.assertFalse(configuracao["solicita_min_max"])
-        self.assertTrue(configuracao["solicita_justificativa"])
+        self.assertEqual(linha[3], "441,25")
+        self.assertEqual(linha[8], "52,50")
 
 
 if __name__ == "__main__":

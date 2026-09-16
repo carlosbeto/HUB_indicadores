@@ -13,6 +13,7 @@ import unittest
 import pandas as pd
 
 from services.radar_ressuprimento_service import (
+    preparar_fila_parametrizacao,
     preparar_fila_prioritaria,
     preparar_fila_risco_pcp,
 )
@@ -188,6 +189,80 @@ class TestFilaPrioritariaRessuprimento(unittest.TestCase):
             fila["quantidade_risco_pcp"].tolist(),
             [100.0, 50.0],
         )
+
+    @staticmethod
+    def _criar_radar_parametrizacao() -> pd.DataFrame:
+        """Cria posições suficientes para testar a fila viva da BINMAT."""
+
+        return pd.DataFrame(
+            [
+                {
+                    "material": "1000001",
+                    "descricao_material": "MATERIAL ALFA",
+                    "posicao": "PT02-001-001-001",
+                    "media_mensal_saida": 100.0,
+                    "saldo_pt02_fisico": 20.0,
+                    "status_parametrizacao_pt02": "PARAMETRIZADA",
+                },
+                {
+                    "material": "1000002",
+                    "descricao_material": "MATERIAL BETA",
+                    "posicao": "PT02-001-002-001",
+                    "media_mensal_saida": 80.0,
+                    "saldo_pt02_fisico": 30.0,
+                    "status_parametrizacao_pt02": "PARAMETRIZAÇÃO PENDENTE",
+                },
+                {
+                    "material": "1000003",
+                    "descricao_material": "MATERIAL GAMA",
+                    "posicao": "PT02-001-003-001",
+                    "media_mensal_saida": 120.0,
+                    "saldo_pt02_fisico": 50.0,
+                    "status_parametrizacao_pt02": (
+                        "REVISAR MIN/MAX — SALDO ACIMA DO MAX"
+                    ),
+                },
+            ]
+        )
+
+    def test_fila_parametrizacao_exclui_posicoes_regulares(self) -> None:
+        """Uma posição corrigida não permanece na lista de trabalho."""
+
+        fila = preparar_fila_parametrizacao(
+            self._criar_radar_parametrizacao()
+        )
+
+        self.assertEqual(
+            fila["material"].tolist(),
+            ["1000003", "1000002"],
+        )
+
+    def test_fila_parametrizacao_filtra_diagnostico(self) -> None:
+        """O controlador pode concentrar a atuação em uma condição."""
+
+        fila = preparar_fila_parametrizacao(
+            self._criar_radar_parametrizacao(),
+            diagnosticos=["PARAMETRIZAÇÃO PENDENTE"],
+        )
+
+        self.assertEqual(fila["material"].tolist(), ["1000002"])
+
+    def test_fila_parametrizacao_pesquisa_material_ou_posicao(self) -> None:
+        """A busca textual não depende de assumir tarefas individuais."""
+
+        radar = self._criar_radar_parametrizacao()
+
+        por_material = preparar_fila_parametrizacao(
+            radar,
+            busca="1000002",
+        )
+        por_posicao = preparar_fila_parametrizacao(
+            radar,
+            busca="003-001",
+        )
+
+        self.assertEqual(por_material["material"].tolist(), ["1000002"])
+        self.assertEqual(por_posicao["material"].tolist(), ["1000003"])
 
 
 if __name__ == "__main__":

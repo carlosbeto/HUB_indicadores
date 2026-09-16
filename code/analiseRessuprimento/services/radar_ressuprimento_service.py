@@ -7,6 +7,8 @@ serviço não repete essa regra: ele apenas seleciona os itens que realmente
 necessitam de abastecimento e aplica o limite escolhido pelo controlador.
 """
 
+import re
+
 import pandas as pd
 
 
@@ -19,6 +21,8 @@ STATUS_RISCO_PCP = {
     "SEM SALDO T001",
     "RESSUPRIR PARCIAL",
 }
+
+STATUS_PARAMETRIZACAO_REGULAR = "PARAMETRIZADA"
 
 
 def _validar_limite(limite: int) -> None:
@@ -100,3 +104,69 @@ def preparar_fila_risco_pcp(
     # Assim como na fila do abastecedor, o serviço preserva a prioridade pela
     # demanda já calculada e apenas aplica o limite escolhido na interface.
     return fila.head(limite).copy()
+
+
+def preparar_fila_parametrizacao(
+    radar: pd.DataFrame,
+    *,
+    diagnosticos: list[str] | None = None,
+    busca: str = "",
+    limite: int | None = None,
+) -> pd.DataFrame:
+    """Prepara a lista viva de posições que exigem atenção na BINMAT.
+
+    A fila nasce sempre do radar atual. Nenhum item é assumido ou concluído:
+    depois de uma nova carga BINMAT, uma posição corrigida deixa de atender ao
+    filtro e desaparece naturalmente. A maior demanda define a prioridade.
+    """
+
+    if limite is not None:
+        _validar_limite(limite)
+
+    if radar.empty:
+        return radar.copy()
+
+    fila = radar[
+        radar["status_parametrizacao_pt02"]
+        != STATUS_PARAMETRIZACAO_REGULAR
+    ].copy()
+
+    if diagnosticos:
+        fila = fila[
+            fila["status_parametrizacao_pt02"].isin(
+                diagnosticos
+            )
+        ]
+
+    busca_normalizada = busca.strip()
+
+    if busca_normalizada:
+        padrao = re.escape(busca_normalizada)
+        mascara = pd.Series(False, index=fila.index)
+
+        for coluna in [
+            "material",
+            "descricao_material",
+            "posicao",
+        ]:
+            mascara = mascara | fila[coluna].astype(str).str.contains(
+                padrao,
+                case=False,
+                na=False,
+            )
+
+        fila = fila[mascara]
+
+    fila = fila.sort_values(
+        by=[
+            "media_mensal_saida",
+            "saldo_pt02_fisico",
+            "material",
+        ],
+        ascending=[False, False, True],
+    )
+
+    if limite is not None:
+        fila = fila.head(limite)
+
+    return fila.reset_index(drop=True)

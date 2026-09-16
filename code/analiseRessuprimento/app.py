@@ -11,8 +11,6 @@ from ui.risco_abastecimento_pcp import (
 from ui.ressuprimento_pt02 import render_ressuprimento_pt02
 
 
-ID_PLANO_INICIAL = 1
-
 # Identidade operacional provisória para a demonstração inicial do workflow.
 #
 # A matrícula não substitui um login completo. Ela apenas permite que todas
@@ -79,10 +77,10 @@ def main() -> None:
                 usuario=usuario,
             )
         else:
-            # A página já homologada da Wave A é preservada sem alterações.
+            # A fila BINMAT é reconstruída a partir dos relatórios atuais.
+            # Não depende de plano, assunção de tarefa ou conclusão manual.
             render_parametrizacao(
                 conn,
-                id_plano=ID_PLANO_INICIAL,
                 usuario=usuario,
             )
 

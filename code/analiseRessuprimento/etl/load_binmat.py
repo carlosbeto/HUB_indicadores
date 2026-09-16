@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 import hashlib
 import sqlite3
@@ -71,6 +72,35 @@ def calcular_sha256(caminho: Path) -> str:
             sha256.update(bloco)
 
     return sha256.hexdigest()
+
+
+def selecionar_snapshot_mais_recente(input_dir: Path) -> Path:
+    """Seleciona o Excel mais recente pela data de modificação do Windows.
+
+    O BINMAT representa uma fotografia atual. Por isso apenas um snapshot
+    deve atualizar a presença das posições no banco em cada execução. O nome
+    do arquivo não participa da escolha e temporários do Excel são ignorados.
+    """
+
+    arquivos = [
+        caminho
+        for caminho in input_dir.glob("*.xlsx")
+        if not caminho.name.startswith("~$")
+    ]
+
+    if not arquivos:
+        raise FileNotFoundError(
+            f"Nenhum arquivo .xlsx encontrado em {input_dir}"
+        )
+
+    # O nome resolve de forma determinística um raro empate de timestamp.
+    return max(
+        arquivos,
+        key=lambda caminho: (
+            caminho.stat().st_mtime,
+            caminho.name.casefold(),
+        ),
+    )
 
 
 def normalizar_codigo(valor) -> str | None:
@@ -891,25 +921,15 @@ def main() -> None:
             "etl\\create_database.py"
         )
 
-    arquivos = sorted(
-        INPUT_DIR.glob("*.xlsx")
+    arquivo_mais_recente = selecionar_snapshot_mais_recente(INPUT_DIR)
+    data_modificacao = datetime.fromtimestamp(
+        arquivo_mais_recente.stat().st_mtime
     )
 
-    # Ignora arquivos temporários do Excel (~$...)
-    arquivos = [
-        arquivo
-        for arquivo in arquivos
-        if not arquivo.name.startswith("~$")
-    ]
-
-    if not arquivos:
-        raise FileNotFoundError(
-            f"Nenhum arquivo .xlsx encontrado em "
-            f"{INPUT_DIR}"
-        )
-
+    print(f"Snapshot selecionado: {arquivo_mais_recente.name}")
     print(
-        f"Arquivos encontrados: {len(arquivos)}"
+        "Data de modificação: "
+        f"{data_modificacao:%Y-%m-%d %H:%M:%S}"
     )
 
     with sqlite3.connect(DB_PATH) as conn:
@@ -919,11 +939,10 @@ def main() -> None:
             "PRAGMA foreign_keys = ON;"
         )
 
-        for arquivo in arquivos:
-            processar_arquivo(
-                conn,
-                arquivo,
-            )
+        processar_arquivo(
+            conn,
+            arquivo_mais_recente,
+        )
 
     print()
     print("=" * 70)

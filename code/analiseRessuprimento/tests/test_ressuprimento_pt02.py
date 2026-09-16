@@ -328,6 +328,10 @@ class TestRessuprimentoPt02(unittest.TestCase):
                 minimo=1.0,
                 maximo=10.0,
             ),
+            demanda=self._criar_demanda(
+                comercial=54.0,
+                tecnica=0.0,
+            ),
             saldo_pt02=self._criar_saldo_pt02(
                 saldo_f5=8.0,
                 saldo_b5=2.0,
@@ -339,6 +343,112 @@ class TestRessuprimentoPt02(unittest.TestCase):
         self.assertEqual(
             item["status_parametrizacao_pt02"],
             "PARAMETRIZADA",
+        )
+
+    def test_calcula_frequencia_teorica_de_reposicao(self) -> None:
+        """A média mensal é dividida pelo lote teórico MAX menos MIN."""
+
+        resultado, _ = self._calcular(
+            posicoes=self._criar_posicao(
+                minimo=1.0,
+                maximo=10.0,
+            ),
+            demanda=self._criar_demanda(
+                comercial=2706.0,
+                tecnica=0.0,
+            ),
+            saldo_pt02=self._criar_saldo_pt02(
+                saldo_f5=1.0,
+            ),
+        )
+        item = resultado.iloc[0]
+
+        self.assertEqual(item["media_mensal_operacional"], 451.0)
+        self.assertEqual(item["lote_teorico_reposicao"], 9.0)
+        self.assertAlmostEqual(item["ciclos_estimados_mes"], 451 / 9)
+        self.assertAlmostEqual(
+            item["intervalo_estimado_dias_uteis"],
+            22 / (451 / 9),
+        )
+        self.assertEqual(
+            item["classificacao_frequencia_reposicao"],
+            "EXCESSIVA — MAIS DE 22 CICLOS/MÊS",
+        )
+        self.assertEqual(
+            item["status_parametrizacao_pt02"],
+            "REVISAR MIN/MAX — REPOSIÇÃO EXCESSIVA",
+        )
+
+    def test_classifica_alta_frequencia_de_reposicao(self) -> None:
+        """Mais de quatro ciclos mensais exige revisão do dimensionamento."""
+
+        resultado, _ = self._calcular(
+            posicoes=self._criar_posicao(
+                minimo=3.0,
+                maximo=13.0,
+            ),
+            demanda=self._criar_demanda(
+                comercial=426.0,
+                tecnica=0.0,
+            ),
+            saldo_pt02=self._criar_saldo_pt02(
+                saldo_f5=5.0,
+            ),
+        )
+        item = resultado.iloc[0]
+
+        self.assertEqual(item["ciclos_estimados_mes"], 7.1)
+        self.assertEqual(
+            item["status_parametrizacao_pt02"],
+            "REVISAR MIN/MAX — ALTA FREQUÊNCIA",
+        )
+
+    def test_classifica_reposicao_recorrente_como_oportunidade(self) -> None:
+        """Mais de um ciclo mensal sinaliza oportunidade sem ser urgência."""
+
+        resultado, _ = self._calcular(
+            posicoes=self._criar_posicao(
+                minimo=1.0,
+                maximo=10.0,
+            ),
+            demanda=self._criar_demanda(
+                comercial=90.0,
+                tecnica=0.0,
+            ),
+            saldo_pt02=self._criar_saldo_pt02(
+                saldo_f5=5.0,
+            ),
+        )
+        item = resultado.iloc[0]
+
+        self.assertAlmostEqual(item["ciclos_estimados_mes"], 15 / 9)
+        self.assertEqual(
+            item["status_parametrizacao_pt02"],
+            "AVALIAR DIMENSIONAMENTO — REPOSIÇÃO RECORRENTE",
+        )
+
+    def test_saldo_acima_do_max_tem_prioridade_sobre_frequencia(self) -> None:
+        """A evidência física prevalece quando os dois alertas coexistem."""
+
+        resultado, _ = self._calcular(
+            posicoes=self._criar_posicao(
+                minimo=3.0,
+                maximo=13.0,
+            ),
+            demanda=self._criar_demanda(
+                comercial=426.0,
+                tecnica=0.0,
+            ),
+            saldo_pt02=self._criar_saldo_pt02(
+                saldo_f5=14.0,
+            ),
+        )
+        item = resultado.iloc[0]
+
+        self.assertEqual(item["ciclos_estimados_mes"], 7.1)
+        self.assertEqual(
+            item["status_parametrizacao_pt02"],
+            "REVISAR MIN/MAX — SALDO ACIMA DO MAX",
         )
 
     def test_umb_do_mb51_define_unidade_operacional(self) -> None:

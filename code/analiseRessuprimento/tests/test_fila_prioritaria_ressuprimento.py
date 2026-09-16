@@ -202,6 +202,7 @@ class TestFilaPrioritariaRessuprimento(unittest.TestCase):
                     "posicao": "PT02-001-001-001",
                     "media_mensal_saida": 100.0,
                     "saldo_pt02_fisico": 20.0,
+                    "ciclos_estimados_mes": 0.5,
                     "status_parametrizacao_pt02": "PARAMETRIZADA",
                 },
                 {
@@ -210,6 +211,7 @@ class TestFilaPrioritariaRessuprimento(unittest.TestCase):
                     "posicao": "PT02-001-002-001",
                     "media_mensal_saida": 80.0,
                     "saldo_pt02_fisico": 30.0,
+                    "ciclos_estimados_mes": pd.NA,
                     "status_parametrizacao_pt02": "PARAMETRIZAÇÃO PENDENTE",
                 },
                 {
@@ -218,6 +220,7 @@ class TestFilaPrioritariaRessuprimento(unittest.TestCase):
                     "posicao": "PT02-001-003-001",
                     "media_mensal_saida": 120.0,
                     "saldo_pt02_fisico": 50.0,
+                    "ciclos_estimados_mes": 7.1,
                     "status_parametrizacao_pt02": (
                         "REVISAR MIN/MAX — SALDO ACIMA DO MAX"
                     ),
@@ -263,6 +266,29 @@ class TestFilaPrioritariaRessuprimento(unittest.TestCase):
 
         self.assertEqual(por_material["material"].tolist(), ["1000002"])
         self.assertEqual(por_posicao["material"].tolist(), ["1000003"])
+
+    def test_multifiltro_usa_condicao_real_de_frequencia(self) -> None:
+        """A frequência aparece mesmo quando outro alerta é o principal."""
+
+        fila = preparar_fila_parametrizacao(
+            self._criar_radar_parametrizacao(),
+            tipos_analise=["Reposição excessiva ou alta"],
+        )
+
+        self.assertEqual(fila["material"].tolist(), ["1000003"])
+
+    def test_multifiltro_nao_duplica_posicao_sobreposta(self) -> None:
+        """Selecionar duas causas soma condições sem repetir posições."""
+
+        fila = preparar_fila_parametrizacao(
+            self._criar_radar_parametrizacao(),
+            tipos_analise=[
+                "Saldo acima do MAX",
+                "Reposição excessiva ou alta",
+            ],
+        )
+
+        self.assertEqual(fila["material"].tolist(), ["1000003"])
 
 
 if __name__ == "__main__":

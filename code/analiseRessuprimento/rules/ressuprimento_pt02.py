@@ -170,7 +170,41 @@ def _classificar_parametrizacao_pt02(
     if linha["saldo_pt02_fisico"] > maximo:
         return "REVISAR MIN/MAX — SALDO ACIMA DO MAX"
 
+    ciclos = linha["ciclos_estimados_mes"]
+
+    if pd.notna(ciclos) and ciclos > 22:
+        return "REVISAR MIN/MAX — REPOSIÇÃO EXCESSIVA"
+
+    if pd.notna(ciclos) and ciclos > 4:
+        return "REVISAR MIN/MAX — ALTA FREQUÊNCIA"
+
+    if pd.notna(ciclos) and ciclos > 1:
+        return "AVALIAR DIMENSIONAMENTO — REPOSIÇÃO RECORRENTE"
+
     return "PARAMETRIZADA"
+
+
+def _classificar_frequencia_reposicao(
+    ciclos: object,
+) -> str:
+    """Traduz a frequência teórica em uma faixa operacional legível."""
+
+    if pd.isna(ciclos):
+        return "NÃO CALCULADA"
+
+    valor = float(ciclos)
+
+    if valor <= 0:
+        return "SEM DEMANDA"
+    if valor <= 1:
+        return "BAIXA — ATÉ 1 CICLO/MÊS"
+    if valor <= 4:
+        return "RECORRENTE — ATÉ 4 CICLOS/MÊS"
+    if valor <= 10:
+        return "ALTA — ATÉ 10 CICLOS/MÊS"
+    if valor <= 22:
+        return "MUITO ALTA — ATÉ 22 CICLOS/MÊS"
+    return "EXCESSIVA — MAIS DE 22 CICLOS/MÊS"
 
 
 # ============================================================
@@ -531,6 +565,69 @@ def calcular_radar_ressuprimento_pt02(
         _calcular_media_mensal_operacional,
         axis=1,
     )
+
+    # --------------------------------------------------------
+    # 6.1 Frequência teórica de reposição do BINMAT
+    # --------------------------------------------------------
+    # Quando o saldo alcança o MIN, o abastecimento teórico recompõe a
+    # posição até o MAX. Portanto, MAX - MIN representa o lote do ciclo.
+    # A divisão da média por esse lote estima quantas reposições seriam
+    # necessárias por mês com a parametrização atual.
+    df["lote_teorico_reposicao"] = pd.Series(
+        pd.NA,
+        index=df.index,
+        dtype="Float64",
+    )
+    df["ciclos_estimados_mes"] = pd.Series(
+        pd.NA,
+        index=df.index,
+        dtype="Float64",
+    )
+    df["intervalo_estimado_dias_uteis"] = pd.Series(
+        pd.NA,
+        index=df.index,
+        dtype="Float64",
+    )
+
+    mascara_parametros_validos = (
+        df["quantidade_minima"].notna()
+        & df["quantidade_maxima"].notna()
+        & (df["quantidade_minima"] > 0)
+        & (df["quantidade_maxima"] > df["quantidade_minima"])
+    )
+
+    df.loc[
+        mascara_parametros_validos,
+        "lote_teorico_reposicao",
+    ] = (
+        df.loc[mascara_parametros_validos, "quantidade_maxima"]
+        - df.loc[mascara_parametros_validos, "quantidade_minima"]
+    )
+
+    df.loc[
+        mascara_parametros_validos,
+        "ciclos_estimados_mes",
+    ] = (
+        df.loc[mascara_parametros_validos, "media_mensal_operacional"]
+        / df.loc[mascara_parametros_validos, "lote_teorico_reposicao"]
+    )
+
+    mascara_com_demanda = (
+        mascara_parametros_validos
+        & (df["ciclos_estimados_mes"] > 0)
+    )
+
+    df.loc[
+        mascara_com_demanda,
+        "intervalo_estimado_dias_uteis",
+    ] = 22.0 / df.loc[
+        mascara_com_demanda,
+        "ciclos_estimados_mes",
+    ]
+
+    df["classificacao_frequencia_reposicao"] = df[
+        "ciclos_estimados_mes"
+    ].map(_classificar_frequencia_reposicao)
 
     # --------------------------------------------------------
     # 7. Necessidade de ressuprimento pela demanda

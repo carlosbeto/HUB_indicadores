@@ -24,6 +24,20 @@ STATUS_RISCO_PCP = {
 
 STATUS_PARAMETRIZACAO_REGULAR = "PARAMETRIZADA"
 
+TIPOS_ANALISE_PARAMETRIZACAO = [
+    "MIN/MAX pendentes ou inconsistentes",
+    "Saldo acima do MAX",
+    "Reposição excessiva ou alta",
+    "Reposição recorrente",
+]
+
+STATUS_MIN_MAX_PENDENTES_OU_INCONSISTENTES = {
+    "PARAMETRIZAÇÃO PENDENTE",
+    "PARAMETRIZAÇÃO INCOMPLETA",
+    "PARÂMETROS MIN/MAX INVÁLIDOS",
+    "PARÂMETROS MIN/MAX A REVISAR",
+}
+
 
 def _validar_limite(limite: int) -> None:
     """Protege os dois recortes contra um limite inválido."""
@@ -110,6 +124,7 @@ def preparar_fila_parametrizacao(
     radar: pd.DataFrame,
     *,
     diagnosticos: list[str] | None = None,
+    tipos_analise: list[str] | None = None,
     busca: str = "",
     limite: int | None = None,
 ) -> pd.DataFrame:
@@ -137,6 +152,41 @@ def preparar_fila_parametrizacao(
                 diagnosticos
             )
         ]
+
+    if tipos_analise:
+        tipos_desconhecidos = set(tipos_analise) - set(
+            TIPOS_ANALISE_PARAMETRIZACAO
+        )
+        if tipos_desconhecidos:
+            raise ValueError(
+                "Tipos de análise desconhecidos: "
+                + ", ".join(sorted(tipos_desconhecidos))
+            )
+
+        status = fila["status_parametrizacao_pt02"]
+        ciclos = pd.to_numeric(
+            fila.get(
+                "ciclos_estimados_mes",
+                pd.Series(pd.NA, index=fila.index),
+            ),
+            errors="coerce",
+        )
+        mascara = pd.Series(False, index=fila.index)
+
+        if "MIN/MAX pendentes ou inconsistentes" in tipos_analise:
+            mascara |= status.isin(
+                STATUS_MIN_MAX_PENDENTES_OU_INCONSISTENTES
+            )
+        if "Saldo acima do MAX" in tipos_analise:
+            mascara |= status.eq(
+                "REVISAR MIN/MAX — SALDO ACIMA DO MAX"
+            )
+        if "Reposição excessiva ou alta" in tipos_analise:
+            mascara |= ciclos.gt(4.0)
+        if "Reposição recorrente" in tipos_analise:
+            mascara |= ciclos.gt(1.0) & ciclos.le(4.0)
+
+        fila = fila[mascara]
 
     busca_normalizada = busca.strip()
 

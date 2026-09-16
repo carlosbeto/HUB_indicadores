@@ -13,7 +13,10 @@ import pandas as pd
 import streamlit as st
 
 from rules.ressuprimento_pt02 import calcular_radar_ressuprimento_pt02
-from services.radar_ressuprimento_service import preparar_fila_parametrizacao
+from services.radar_ressuprimento_service import (
+    TIPOS_ANALISE_PARAMETRIZACAO,
+    preparar_fila_parametrizacao,
+)
 from ui.ressuprimento_pt02 import (
     _formatar_numero_operacional_br,
     _formatar_quantidade_operacional,
@@ -24,15 +27,61 @@ COLUNAS_PARAMETRIZACAO = {
     "material": "Material",
     "descricao_material": "Descrição",
     "posicao": "Posição PT02",
-    "media_mensal_operacional": "Média mensal",
-    "quantidade_minima": "MIN atual",
-    "quantidade_maxima": "MAX atual",
-    "saldo_pt02_f5": "Saldo F5",
-    "saldo_pt02_b5": "Saldo B5",
-    "saldo_pt02_fisico": "Saldo físico",
+    "media_mensal_operacional": "Consumo médio/mês",
+    "quantidade_minima": "MIN no SAP",
+    "quantidade_maxima": "MAX no SAP",
+    "lote_teorico_reposicao": "Qtd. por reposição",
+    "ciclos_estimados_mes": "Reposições estimadas/mês",
+    "intervalo_estimado_dias_uteis": "Dias úteis entre reposições",
+    "saldo_pt02_f5": "Saldo livre PT02",
+    "saldo_pt02_b5": "Saldo bloqueado PT02",
+    "saldo_pt02_fisico": "Ocupação atual PT02",
     "unidade_operacional": "UMB",
-    "status_parametrizacao_pt02": "Diagnóstico",
+    "classificacao_frequencia_reposicao": "Nível de frequência",
+    "status_parametrizacao_pt02": "Ação recomendada",
 }
+
+
+ORIENTACOES_DIAGNOSTICO = {
+    "PARAMETRIZAÇÃO PENDENTE": (
+        "Medir a capacidade da posição e cadastrar MIN e MAX no SAP."
+    ),
+    "PARAMETRIZAÇÃO INCOMPLETA": (
+        "Completar no SAP o parâmetro MIN ou MAX que está ausente."
+    ),
+    "PARÂMETROS MIN/MAX INVÁLIDOS": (
+        "Corrigir o SAP: o MAX precisa ser maior que o MIN."
+    ),
+    "PARÂMETROS MIN/MAX A REVISAR": (
+        "Revisar o SAP: MIN e MAX iguais não formam lote de reposição."
+    ),
+    "REVISAR MIN/MAX — SALDO ACIMA DO MAX": (
+        "Conferir a capacidade física: a posição contém mais material do "
+        "que o MAX cadastrado permite."
+    ),
+    "REVISAR MIN/MAX — REPOSIÇÃO EXCESSIVA": (
+        "Redimensionar a posição com prioridade para reduzir reposições "
+        "diárias repetidas."
+    ),
+    "REVISAR MIN/MAX — ALTA FREQUÊNCIA": (
+        "Avaliar aumento do lote ou da capacidade para reduzir o retrabalho "
+        "de abastecimento."
+    ),
+    "AVALIAR DIMENSIONAMENTO — REPOSIÇÃO RECORRENTE": (
+        "Verificar se a posição pode comportar um lote maior e exigir menos "
+        "reposições durante o mês."
+    ),
+}
+
+
+def _formatar_decimal_br(valor: object) -> str:
+    """Formata indicadores contínuos com duas casas no padrão brasileiro."""
+
+    if pd.isna(valor):
+        return "Não calculado"
+
+    formato = f"{float(valor):,.2f}"
+    return formato.replace(",", "#").replace(".", ",").replace("#", ".")
 
 
 def _formatar_fila_parametrizacao(fila: pd.DataFrame) -> pd.DataFrame:
@@ -45,12 +94,13 @@ def _formatar_fila_parametrizacao(fila: pd.DataFrame) -> pd.DataFrame:
     )
 
     for coluna in [
-        "Média mensal",
-        "MIN atual",
-        "MAX atual",
-        "Saldo F5",
-        "Saldo B5",
-        "Saldo físico",
+        "Consumo médio/mês",
+        "MIN no SAP",
+        "MAX no SAP",
+        "Qtd. por reposição",
+        "Saldo livre PT02",
+        "Saldo bloqueado PT02",
+        "Ocupação atual PT02",
     ]:
         exibicao[coluna] = exibicao.apply(
             lambda linha: _formatar_numero_operacional_br(
@@ -59,6 +109,17 @@ def _formatar_fila_parametrizacao(fila: pd.DataFrame) -> pd.DataFrame:
             ),
             axis=1,
         )
+
+    exibicao["Reposições estimadas/mês"] = exibicao[
+        "Reposições estimadas/mês"
+    ].map(
+        _formatar_decimal_br
+    )
+    exibicao["Dias úteis entre reposições"] = exibicao[
+        "Dias úteis entre reposições"
+    ].map(
+        _formatar_decimal_br
+    )
 
     return exibicao
 
@@ -99,7 +160,32 @@ def render_parametrizacao(
         "REVISAR MIN/MAX — SALDO ACIMA DO MAX",
         0,
     )
-    outros = total_atencao - pendentes - acima_max
+    frequencia = int(
+        (
+            pd.to_numeric(
+                radar["ciclos_estimados_mes"],
+                errors="coerce",
+            )
+            > 1
+        ).sum()
+    )
+    status_frequencia = {
+        "AVALIAR DIMENSIONAMENTO — REPOSIÇÃO RECORRENTE",
+        "REVISAR MIN/MAX — ALTA FREQUÊNCIA",
+        "REVISAR MIN/MAX — REPOSIÇÃO EXCESSIVA",
+    }
+    outros = sum(
+        quantidade
+        for status, quantidade in contagem.items()
+        if status not in (
+            status_frequencia
+            | {
+                "PARAMETRIZADA",
+                "PARAMETRIZAÇÃO PENDENTE",
+                "REVISAR MIN/MAX — SALDO ACIMA DO MAX",
+            }
+        )
+    )
 
     st.caption(
         "Janela móvel da demanda: "
@@ -108,10 +194,17 @@ def render_parametrizacao(
         f"PT02 analisadas: {indicadores['pt02_definitivas']}"
     )
 
-    coluna_total, coluna_pendente, coluna_max, coluna_outros = st.columns(4)
+    (
+        coluna_total,
+        coluna_pendente,
+        coluna_max,
+        coluna_frequencia,
+        coluna_outros,
+    ) = st.columns(5)
     coluna_total.metric("Posições com atenção", total_atencao)
     coluna_pendente.metric("MIN/MAX pendentes", pendentes)
     coluna_max.metric("Saldo acima do MAX", acima_max)
+    coluna_frequencia.metric("Reposição acima de 1 ciclo/mês", frequencia)
     coluna_outros.metric("Outras inconsistências", outros)
 
     st.info(
@@ -120,27 +213,36 @@ def render_parametrizacao(
         "automaticamente."
     )
 
+    with st.expander("Como usar esta tela", expanded=True):
+        st.markdown(
+            """
+1. **Escolha um ou mais tipos de análise** conforme o trabalho que será realizado.
+2. **Defina o Top 10, 20, 50...** para preparar um lote viável de posições.
+3. **Selecione uma posição** e confira a causa e a ação recomendada.
+4. **Verifique fisicamente a capacidade** antes de alterar MIN/MAX no SAP.
+5. Depois do ajuste, execute os ETLs. A posição regularizada deixa a fila.
+
+**Como o esforço é estimado:** a quantidade por reposição é `MAX − MIN`.
+O consumo médio mensal dividido por esse lote estima quantas reposições serão
+necessárias no mês. O intervalo usa 22 dias úteis apenas como referência.
+            """
+        )
+
     st.subheader("Lista de trabalho do controlador")
     st.caption(
-        "A ordem é definida pela maior demanda mensal. Use os filtros para "
-        "preparar um lote de trabalho por diagnóstico, material ou posição."
-    )
-
-    diagnosticos_disponiveis = sorted(
-        fila_completa["status_parametrizacao_pt02"]
-        .dropna()
-        .unique()
-        .tolist()
+        "A ferramenta indica onde investigar; ela não define sozinha o novo "
+        "MIN/MAX. A ordem continua sendo definida pelo maior consumo médio."
     )
 
     coluna_filtro, coluna_busca = st.columns([2, 1])
 
     with coluna_filtro:
-        diagnosticos = st.multiselect(
-            "Diagnósticos",
-            options=diagnosticos_disponiveis,
-            default=diagnosticos_disponiveis,
-            key="diagnosticos_parametrizacao_binmat",
+        tipos_analise = st.multiselect(
+            "Tipos de análise",
+            options=TIPOS_ANALISE_PARAMETRIZACAO,
+            default=[],
+            placeholder="Vazio = mostrar todos os itens com atenção",
+            key="tipo_analise_parametrizacao_binmat",
         )
 
     with coluna_busca:
@@ -151,7 +253,7 @@ def render_parametrizacao(
 
     fila_filtrada = preparar_fila_parametrizacao(
         radar,
-        diagnosticos=diagnosticos,
+        tipos_analise=tipos_analise,
         busca=busca,
     )
 
@@ -171,6 +273,10 @@ def render_parametrizacao(
     coluna_resultado.caption(
         f"Exibindo {len(fila_exibida)} de "
         f"{len(fila_filtrada)} posições filtradas."
+    )
+    coluna_resultado.caption(
+        "Os indicadores de saldo e frequência podem apontar a mesma posição; "
+        "o total considera cada posição apenas uma vez."
     )
 
     with coluna_exportacao:
@@ -234,6 +340,35 @@ def render_parametrizacao(
         _formatar_quantidade_operacional(item["saldo_pt02_fisico"], unidade),
     )
 
+    coluna_lote, coluna_ciclos, coluna_intervalo = st.columns(3)
+    coluna_lote.metric(
+        "Lote teórico (MAX − MIN)",
+        _formatar_quantidade_operacional(
+            item["lote_teorico_reposicao"],
+            unidade,
+        ),
+    )
+    coluna_ciclos.metric(
+        "Ciclos estimados/mês",
+        _formatar_decimal_br(item["ciclos_estimados_mes"]),
+    )
+    intervalo = _formatar_decimal_br(
+        item["intervalo_estimado_dias_uteis"]
+    )
+    coluna_intervalo.metric(
+        "Intervalo estimado",
+        (
+            intervalo
+            if intervalo == "Não calculado"
+            else f"{intervalo} dias úteis"
+        ),
+    )
+
+    st.caption(
+        "Frequência estimada: "
+        f"{item['classificacao_frequencia_reposicao']}"
+    )
+
     st.write(
         "**Composição do saldo físico:** "
         f"F5 {_formatar_quantidade_operacional(item['saldo_pt02_f5'], unidade)} "
@@ -241,6 +376,12 @@ def render_parametrizacao(
         f"B5 {_formatar_quantidade_operacional(item['saldo_pt02_b5'], unidade)}"
     )
     st.warning(
-        "Diagnóstico BINMAT: "
+        "Ação recomendada: "
         f"{item['status_parametrizacao_pt02']}"
+    )
+    st.info(
+        ORIENTACOES_DIAGNOSTICO.get(
+            item["status_parametrizacao_pt02"],
+            "Revisar os dados da posição antes de alterar o SAP.",
+        )
     )

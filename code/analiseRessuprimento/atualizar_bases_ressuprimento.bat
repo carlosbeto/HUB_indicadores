@@ -3,7 +3,7 @@ setlocal EnableExtensions
 chcp 65001 >nul
 
 rem ================================================================
-rem ATUALIZACAO DAS BASES - ANALISE DE RESSUPRIMENTO (DEV)
+rem ATUALIZACAO DAS BASES - ANALISE DE RESSUPRIMENTO
 rem
 rem Este arquivo deve permanecer na raiz de analiseRessuprimento.
 rem Ele cria um backup do SQLite e executa os tres ETLs de rotina.
@@ -14,13 +14,7 @@ title Atualizacao das bases - Analise de Ressuprimento
 
 set "PYTHONUTF8=1"
 set "PYTHONIOENCODING=utf-8"
-set "PYTHON_EXE=python"
-
-rem Se futuramente o projeto possuir ambiente virtual proprio, ele sera
-rem utilizado automaticamente. Caso contrario, permanece o Python do PATH.
-if exist ".venv\Scripts\python.exe" (
-    set "PYTHON_EXE=.venv\Scripts\python.exe"
-)
+set "PYTHON_EXE=%CD%\.venv\Scripts\python.exe"
 
 set "DB_FILE=%CD%\data_db\ressuprimento.sqlite"
 set "BACKUP_DIR=%CD%\data_db\backups"
@@ -29,7 +23,10 @@ echo ================================================================
 echo ATUALIZACAO DAS BASES - ANALISE DE RESSUPRIMENTO
 echo ================================================================
 echo Pasta: %CD%
+echo Python: %PYTHON_EXE%
 echo.
+
+if not exist "%PYTHON_EXE%" goto :erro_venv
 
 "%PYTHON_EXE%" --version >nul 2>&1
 if errorlevel 1 goto :erro_python
@@ -80,6 +77,13 @@ exit /b 0
 :erro_python
 echo.
 echo ERRO: Python nao foi encontrado ou nao pode ser executado.
+goto :falha
+
+:erro_venv
+echo.
+echo ERRO: ambiente virtual nao encontrado em:
+echo %PYTHON_EXE%
+echo Crie o .venv e instale requirements.txt antes de executar os ETLs.
 goto :falha
 
 :erro_banco

@@ -1,0 +1,5 @@
+# Dependencias diretas homologadas para o modulo analiseRessuprimento.
+# Ambiente de referencia: Python 3.13.2.
+streamlit==1.54.0
+pandas==2.3.3
+openpyxl==3.1.5

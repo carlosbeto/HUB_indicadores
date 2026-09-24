@@ -44,3 +44,6 @@ code/analiseRessuprimento/data_db/
 code/analiseRessuprimento/INPUT/
 code/analiseRessuprimento/logs/
 code/analiseRessuprimento/OUTPUT/
+
+# Planilhas locais usadas em testes manuais
+tests/*.xlsx

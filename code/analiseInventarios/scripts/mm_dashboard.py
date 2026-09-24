@@ -678,10 +678,11 @@ def _render_tabela_evolucao_mm(
                 "Contados",
                 "Cobertura (%)",
                 "Gap mês (%)",
+                "Falta contar para meta mensal (itens)",
                 "Meta semestre (%)",
                 "Cobertura semestre (%)",
                 "Gap semestre (%)",
-                "Falta contar para meta (itens)",
+                "Falta contar para meta semestral (itens)",
             ]
         ].copy()
 
@@ -695,7 +696,12 @@ def _render_tabela_evolucao_mm(
             columns={
                 "Gap mês (%)": "Desvio mês (p.p.)",
                 "Gap semestre (%)": "Desvio semestre (p.p.)",
-                "Falta contar para meta (itens)": "Falta contar p/ meta",
+                "Falta contar para meta mensal (itens)": (
+                    "Falta contar p/ meta mensal"
+                ),
+                "Falta contar para meta semestral (itens)": (
+                    "Falta contar p/ meta semestral"
+                ),
             }
         )
 
@@ -733,6 +739,25 @@ def _render_tabela_evolucao_mm(
             df_hist_view["Desvio semestre (p.p.)"]
             .apply(status_com_icone)
         )
+
+        # Mantém cada pendência junto do status correspondente, evitando que
+        # a meta acumulada seja interpretada como meta isolada do mês.
+        df_hist_view = df_hist_view[
+            [
+                "Mês",
+                "Baseline",
+                "Contados",
+                "Cobertura (%)",
+                "Desvio mês (p.p.)",
+                "Falta contar p/ meta mensal",
+                "Status mês",
+                "Meta semestre (%)",
+                "Cobertura semestre (%)",
+                "Desvio semestre (p.p.)",
+                "Falta contar p/ meta semestral",
+                "Status semestre",
+            ]
+        ]
 
         def cor_desvio(valor):
             """
@@ -802,7 +827,8 @@ def _render_tabela_evolucao_mm(
                     "Meta semestre (%)": lambda x: fmt_pct(x),
                     "Cobertura semestre (%)": lambda x: fmt_pct(x),
                     "Desvio semestre (p.p.)": lambda x: fmt_pp(x),
-                    "Falta contar p/ meta": lambda x: fmt_int(x),
+                    "Falta contar p/ meta mensal": lambda x: fmt_int(x),
+                    "Falta contar p/ meta semestral": lambda x: fmt_int(x),
                 }
             )
             .map(
@@ -834,7 +860,9 @@ def _render_tabela_evolucao_mm(
             "contados dividida pela média dos baselines, com a "
             "meta acumulada. Valores positivos indicam desempenho "
             "acima da meta; valores negativos indicam desempenho "
-            "abaixo da meta."
+            "abaixo da meta. A falta mensal mostra o esforço necessário "
+            "para cumprir a parcela isolada do mês; a falta semestral "
+            "mostra o esforço restante para alcançar a meta acumulada."
         )
 
 def render_mm_dashboard(

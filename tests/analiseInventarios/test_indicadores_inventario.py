@@ -57,6 +57,40 @@ def test_calcula_falta_para_meta_em_agosto():
     assert agosto["Meta semestre (%)"] == 33.33
     assert agosto["Meta semestre (itens)"] == 417
     assert agosto["Falta contar para meta (itens)"] == 117
+    assert agosto["Falta contar para meta semestral (itens)"] == 117
+
+
+def test_separa_falta_mensal_da_falta_semestral():
+    """A folga acumulada não deve esconder o atraso isolado do mês."""
+
+    df = pd.DataFrame(
+        {
+            "Mês": [
+                "2026-07",
+                "2026-08",
+                "2026-09",
+                "2026-10",
+                "2026-11",
+                "2026-12",
+            ],
+            "Baseline": [7202, 6971, 6994, 0, 0, 0],
+            "Contados": [1407, 1546, 678, 0, 0, 0],
+        }
+    )
+
+    resultado = calcular_cobertura_semestral(
+        df,
+        data_referencia=date(2026, 9, 24),
+    )
+
+    setembro = resultado.loc[
+        resultado["Mês"] == "2026-09"
+    ].iloc[0]
+
+    assert setembro["Meta mensal (itens)"] == 1166
+    assert setembro["Falta contar para meta mensal (itens)"] == 488
+    assert setembro["Falta contar para meta semestral (itens)"] == 0
+    assert setembro["Falta contar para meta (itens)"] == 0
 
 def test_mes_valido_com_zero_contagens_participa_do_calculo():
     """
@@ -141,6 +175,11 @@ def test_meses_futuros_nao_geram_indicadores_realizados():
     assert pd.isna(setembro["Meta semestre (%)"])
     assert pd.isna(setembro["Gap semestre (%)"])
     assert pd.isna(setembro["Meta semestre (itens)"])
+    assert pd.isna(setembro["Meta mensal (itens)"])
+    assert pd.isna(setembro["Falta contar para meta mensal (itens)"])
+    assert pd.isna(
+        setembro["Falta contar para meta semestral (itens)"]
+    )
     assert pd.isna(setembro["Falta contar para meta (itens)"])
 
 def test_semestre_encerrado_considera_todos_os_meses_validos():
@@ -205,6 +244,13 @@ def test_semestre_futuro_nao_gera_indicadores_realizados():
     assert resultado["Cobertura semestre (%)"].isna().all()
     assert resultado["Meta semestre (%)"].isna().all()
     assert resultado["Gap semestre (%)"].isna().all()
+    assert resultado["Meta mensal (itens)"].isna().all()
+    assert resultado[
+        "Falta contar para meta mensal (itens)"
+    ].isna().all()
+    assert resultado[
+        "Falta contar para meta semestral (itens)"
+    ].isna().all()
     assert resultado["Falta contar para meta (itens)"].isna().all()
 
 def test_erro_quando_falta_coluna_obrigatoria():

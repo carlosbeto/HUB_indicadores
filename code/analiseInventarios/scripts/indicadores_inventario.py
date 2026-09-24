@@ -38,6 +38,10 @@ def calcular_cobertura_semestral(
     - Mês índice
     - Meta semestre (%)
     - Gap semestre (%)
+    - Meta mensal (itens)
+    - Falta contar para meta mensal (itens)
+    - Meta semestre (itens)
+    - Falta contar para meta semestral (itens)
     """
 
     resultado = df.copy()
@@ -177,6 +181,46 @@ def calcular_cobertura_semestral(
         - resultado["Meta semestre (%)"]
     ).round(2)
 
+    # Converte a parcela mensal de 1/6 do baseline do próprio mês em
+    # quantidade inteira de itens. Esse indicador é independente da folga
+    # acumulada em meses anteriores.
+    resultado["Meta mensal (itens)"] = pd.Series(
+        pd.NA,
+        index=resultado.index,
+        dtype="Int64",
+    )
+
+    mask_meta_mensal = resultado["Período válido"]
+
+    resultado.loc[
+        mask_meta_mensal,
+        "Meta mensal (itens)",
+    ] = (
+        resultado.loc[mask_meta_mensal, "Baseline"]
+        .apply(lambda valor: math.ceil(float(valor) / 6.0))
+        .astype("Int64")
+    )
+
+    resultado["Falta contar para meta mensal (itens)"] = pd.Series(
+        pd.NA,
+        index=resultado.index,
+        dtype="Int64",
+    )
+
+    resultado.loc[
+        mask_meta_mensal,
+        "Falta contar para meta mensal (itens)",
+    ] = (
+        resultado.loc[
+            mask_meta_mensal,
+            "Meta mensal (itens)",
+        ].astype("Int64")
+        - resultado.loc[
+            mask_meta_mensal,
+            "Contados",
+        ].round().astype("Int64")
+    ).clip(lower=0)
+
     # Converte a meta percentual acumulada em quantidade inteira de itens.
     # Usamos arredondamento para cima porque não existe fração de SKU:
     # se a meta exigir 415,2 itens, na prática são necessários 416.
@@ -209,7 +253,7 @@ def calcular_cobertura_semestral(
     # Mostra quantos itens adicionais ainda precisam ser contados
     # para atingir a meta acumulada daquele mês.
     # Se a meta já foi atingida, o saldo exibido é zero.
-    resultado["Falta contar para meta (itens)"] = pd.Series(
+    resultado["Falta contar para meta semestral (itens)"] = pd.Series(
         pd.NA,
         index=resultado.index,
         dtype="Int64",
@@ -217,7 +261,7 @@ def calcular_cobertura_semestral(
 
     resultado.loc[
         mask_meta_itens,
-        "Falta contar para meta (itens)",
+        "Falta contar para meta semestral (itens)",
     ] = (
         resultado.loc[
             mask_meta_itens,
@@ -228,4 +272,10 @@ def calcular_cobertura_semestral(
             "Contados acumulado",
         ].round().astype("Int64")
     ).clip(lower=0)
+
+    # Compatibilidade temporária: o dashboard MM ainda consome o nome antigo.
+    # Ele será migrado para o campo semestral explícito no próximo incremento.
+    resultado["Falta contar para meta (itens)"] = resultado[
+        "Falta contar para meta semestral (itens)"
+    ].copy()
     return resultado

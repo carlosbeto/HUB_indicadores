@@ -182,9 +182,56 @@ def render_ressuprimento_pt02(
         meses=6,
     )
 
+    # A inconsistência de destino PT02 aparece antes da fila de ações.
+    # Esses materiais permanecem no radar para auditoria, mas não entram
+    # nas métricas operacionais nem em transferências sugeridas.
+    duplicidades = radar.loc[radar["duplicidade_pt02"]].copy()
+    radar_regular = radar.loc[~radar["duplicidade_pt02"]].copy()
+    total_materiais_duplicados = indicadores[
+        "qtd_materiais_duplicados_pt02"
+    ]
+    if total_materiais_duplicados:
+        materiais = ", ".join(
+            str(material)
+            for material in indicadores["materiais_duplicados_pt02"]
+        )
+        st.header("🚨 CONFLITO DE POSIÇÕES PT02 — AÇÃO BLOQUEADA")
+        st.error(
+            f"{total_materiais_duplicados} material(is) aparecem em mais de "
+            "uma posição PT02 definitiva na BINMAT. "
+            f"Materiais: {materiais}. Não há transferência sugerida "
+            "para eles. Confira abaixo todas as posições e regularize "
+            "a origem dos dados; os demais materiais continuam na fila."
+        )
+        st.dataframe(
+            duplicidades[
+                [
+                    "material",
+                    "descricao_material",
+                    "posicao",
+                    "id_posicao_material",
+                    "data_modificacao",
+                ]
+            ].rename(
+                columns={
+                    "material": "Material",
+                    "descricao_material": "Descrição",
+                    "posicao": "Posição PT02",
+                    "id_posicao_material": "ID da posição",
+                    "data_modificacao": "Modificação BINMAT",
+                }
+            ),
+            width="stretch",
+            hide_index=True,
+        )
+    else:
+        # O indicador sempre visível também confirma que a versão corrigida
+        # da tela está em execução, mesmo quando não há conflitos no banco.
+        st.info("Verificação BINMAT: 0 materiais com conflito PT02.")
+
     contagem_status = indicadores["status_operacional"]
     total_necessidade = int(
-        (radar["necessidade_ressuprimento"] > 0).sum()
+        (radar_regular["necessidade_ressuprimento"] > 0).sum()
     )
     total_acoes = (
         contagem_status.get("RESSUPRIR", 0)
@@ -246,13 +293,13 @@ def render_ressuprimento_pt02(
     )
 
     fila = preparar_fila_prioritaria(
-        radar,
+        radar_regular,
         limite=limite,
     )
 
     if fila.empty:
         st.success(
-            "Nenhuma posição PT02 necessita de ressuprimento."
+            "Nenhuma posição PT02 regular está apta a ressuprimento."
         )
         return
 

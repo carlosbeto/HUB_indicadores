@@ -398,6 +398,16 @@ def calcular_radar_ressuprimento_pt02(
         )
     ].copy()
 
+    # Uma linha por material é a regra para posições PT02 definitivas.
+    # Preservamos toda ocorrência anômala para exibir as posições afetadas.
+    df["duplicidade_pt02"] = df["material"].duplicated(keep=False)
+    materiais_duplicados = (
+        df.loc[df["duplicidade_pt02"], ["material", "posicao"]]
+        .groupby("material", dropna=False)["posicao"]
+        .agg(lambda posicoes: sorted({str(p) for p in posicoes}))
+        .to_dict()
+    )
+
     # --------------------------------------------------------
     # 3. Consolidar e incorporar saldo PT02
     # --------------------------------------------------------
@@ -413,7 +423,7 @@ def calcular_radar_ressuprimento_pt02(
             "posicao",
         ],
         how="left",
-        validate="one_to_one",
+        validate="many_to_one",
     )
 
     # eq(True) converte tanto False quanto ausência do LEFT JOIN em False sem
@@ -465,7 +475,7 @@ def calcular_radar_ressuprimento_pt02(
         df_t001,
         on="material",
         how="left",
-        validate="one_to_one",
+        validate="many_to_one",
     )
 
     colunas_t001_zero = [
@@ -488,7 +498,7 @@ def calcular_radar_ressuprimento_pt02(
         df_demanda,
         on="material",
         how="left",
-        validate="one_to_one",
+        validate="many_to_one",
     )
 
     # DataFrames simulados por integrações antigas podem ainda não carregar
@@ -692,6 +702,13 @@ def calcular_radar_ressuprimento_pt02(
         axis=1,
     )
 
+    # O mesmo saldo T001 e a mesma demanda pertencem ao material. Não existe
+    # uma posição de destino homologada quando ele ocupa mais de uma PT02.
+    df.loc[
+        df["duplicidade_pt02"],
+        "status_operacional",
+    ] = "DUPLICIDADE PT02 — VERIFICAR BINMAT"
+
     # --------------------------------------------------------
     # 10. Quantidade sugerida
     # --------------------------------------------------------
@@ -747,6 +764,7 @@ def calcular_radar_ressuprimento_pt02(
     # --------------------------------------------------------
 
     ordem_status = {
+        "DUPLICIDADE PT02 — VERIFICAR BINMAT": 0,
         "RESSUPRIR": 1,
         "RESSUPRIR PARCIAL": 1,
         "SEM SALDO T001": 1,
@@ -818,6 +836,8 @@ def calcular_radar_ressuprimento_pt02(
         "data_referencia_demanda": data_referencia,
         "meses_demanda": meses,
         "pt02_definitivas": len(df),
+        "materiais_duplicados_pt02": materiais_duplicados,
+        "qtd_materiais_duplicados_pt02": len(materiais_duplicados),
         # Mantemos status como alias do indicador anterior para não quebrar
         # consumidores existentes durante a evolução controlada da interface.
         "status": contagem_status_operacional,

@@ -3,9 +3,14 @@ from __future__ import annotations
 import sqlite3
 from datetime import date
 
+import pandas as pd
+import pytest
+
 from analiseEstoques.scripts.update_from_sap import (
     compute_and_store_kpi_diario,
+    ensure_dim_material_custo,
     ensure_kpi_diario_table,
+    upsert_mb51_mov,
 )
 
 
@@ -158,5 +163,158 @@ def test_kpi_mb51_mast_respeita_regra_de_entradas_e_saidas() -> None:
         assert net_val == 600.0
         assert net_qtd == 60.0
 
+    finally:
+        con.close()
+
+
+def criar_lote_mb51_para_upsert(
+    movimentos: list[dict],
+    custos: dict[str, float],
+) -> tuple[sqlite3.Connection, pd.DataFrame]:
+    """
+    Prepara um banco isolado e um lote MB51 para testar a barreira de
+    anomalias sem depender de arquivos Excel ou do banco operacional.
+    """
+    con = sqlite3.connect(":memory:")
+    ensure_dim_material_custo(con)
+
+    con.executemany(
+        """
+        INSERT INTO dim_material_custo (
+            material,
+            custo_unit,
+            source_file,
+            source_last_modified,
+            load_ts
+        )
+        VALUES (?, ?, 'teste_custo.xlsx', '2026-09-30', '2026-09-30 08:00:00')
+        """,
+        list(custos.items()),
+    )
+
+    return con, pd.DataFrame(movimentos)
+
+
+def movimento_mb51(
+    *,
+    material: str,
+    quantidade: float,
+    documento: str,
+    item: str = "1",
+) -> dict:
+    """Monta uma linha normalizada no formato recebido pelo upsert."""
+    return {
+        "data_lancamento": "2026-09-29",
+        "deposito": "MAST",
+        "material": material,
+        "deb_cred": "S",
+        "ordem": "",
+        "tipo_movimento": "Z69",
+        "doc_deposito": "",
+        "doc_material": documento,
+        "item_doc_material": item,
+        "descricao_mb51": "MATERIAL DE TESTE",
+        "quantidade": quantidade,
+    }
+
+
+def test_upsert_mb51_permite_lote_dentro_dos_limites() -> None:
+    """Uma carga operacional normal continua sendo gravada."""
+    movimentos = [
+        movimento_mb51(
+            material="MAT001",
+            quantidade=100.0,
+            documento="4907000001",
+        )
+    ]
+    con, df = criar_lote_mb51_para_upsert(
+        movimentos,
+        {"MAT001": 25.0},
+    )
+
+    try:
+        upsert_mb51_mov(con, df, "mb51_normal.xlsx")
+
+        row = con.execute(
+            """
+            SELECT quantidade, custo_unit, valor_estimado
+            FROM fact_mb51_mov
+            """
+        ).fetchone()
+
+        assert row == (100.0, 25.0, 2500.0)
+    finally:
+        con.close()
+
+
+def test_upsert_mb51_bloqueia_quantidade_anomala_e_nao_grava_lote() -> None:
+    """Uma quantidade anômala cancela inclusive as linhas normais do lote."""
+    movimentos = [
+        movimento_mb51(
+            material="MAT_NORMAL",
+            quantidade=10.0,
+            documento="4907000002",
+        ),
+        movimento_mb51(
+            material="MAT_ANOMALO",
+            quantidade=100_001.0,
+            documento="4907668093",
+            item="7",
+        ),
+    ]
+    con, df = criar_lote_mb51_para_upsert(
+        movimentos,
+        {"MAT_NORMAL": 5.0, "MAT_ANOMALO": 1.0},
+    )
+
+    try:
+        with pytest.raises(ValueError) as erro:
+            upsert_mb51_mov(con, df, "MB51MAST300926.xlsx")
+
+        mensagem = str(erro.value)
+        assert "Carga MB51 cancelada" in mensagem
+        assert "Nenhum movimento deste lote foi gravado" in mensagem
+        assert "MB51MAST300926.xlsx" in mensagem
+        assert "material=MAT_ANOMALO" in mensagem
+        assert "documento=4907668093" in mensagem
+        assert "item=7" in mensagem
+        assert "quantidade=100,001.00" in mensagem
+
+        total = con.execute(
+            "SELECT COUNT(*) FROM fact_mb51_mov"
+        ).fetchone()[0]
+        assert total == 0
+    finally:
+        con.close()
+
+
+def test_upsert_mb51_bloqueia_valor_estimado_anomalo() -> None:
+    """Valor excessivo também bloqueia a carga, mesmo com pouca quantidade."""
+    movimentos = [
+        movimento_mb51(
+            material="MAT_CARO",
+            quantidade=1.0,
+            documento="4907668284",
+            item="3",
+        )
+    ]
+    con, df = criar_lote_mb51_para_upsert(
+        movimentos,
+        {"MAT_CARO": 10_000_001.0},
+    )
+
+    try:
+        with pytest.raises(ValueError) as erro:
+            upsert_mb51_mov(con, df, "mb51_valor_anomalo.xlsx")
+
+        mensagem = str(erro.value)
+        assert "material=MAT_CARO" in mensagem
+        assert "documento=4907668284" in mensagem
+        assert "valor_estimado=10,000,001.00" in mensagem
+
+        total = con.execute(
+            "SELECT COUNT(*) FROM fact_mb51_mov"
+        ).fetchone()[0]
+        assert total == 0
     finally:
         con.close()

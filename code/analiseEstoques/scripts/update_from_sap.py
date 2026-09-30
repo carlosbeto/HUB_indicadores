@@ -45,6 +45,14 @@ from analiseEstoques.etl.load_dim_material_db import carregar_dim_material
 
 SAP_SHEET_DEFAULT = "Exportação SAPUI5"
 
+# Limites operacionais de segurança para uma única linha da MB51.
+#
+# A carga é interrompida antes do INSERT quando qualquer um deles é
+# ultrapassado. Os limites ficam centralizados aqui para permitir revisão
+# futura sem espalhar números fixos pelo ETL.
+MB51_LIMITE_QUANTIDADE_ABS = 100_000.0
+MB51_LIMITE_VALOR_ESTIMADO_ABS = 10_000_000.0
+
 
 # ============================================================
 # Helpers (datas / textos / colunas / SQLite safety)
@@ -672,6 +680,99 @@ def ensure_mb51_schema(con: sqlite3.Connection):
     """
     ensure_fact_mb51_mov(con)
 
+
+def validar_anomalias_mb51(
+    df_mb51: pd.DataFrame,
+    source_file: str,
+    limite_quantidade_abs: float = MB51_LIMITE_QUANTIDADE_ABS,
+    limite_valor_estimado_abs: float = MB51_LIMITE_VALOR_ESTIMADO_ABS,
+) -> None:
+    """
+    Interrompe a carga quando uma linha da MB51 ultrapassa os limites.
+
+    A validação ocorre antes de montar as tuplas e antes do ``executemany``.
+    Portanto, uma única anomalia impede a gravação de todo o lote MB51.
+
+    A mensagem inclui os campos necessários para localizar e corrigir a
+    linha no arquivo de origem: linha aproximada do Excel, material,
+    documento, item, quantidade e valor estimado.
+    """
+    quantidade_abs = pd.to_numeric(
+        df_mb51["quantidade"],
+        errors="coerce",
+    ).fillna(0.0).abs()
+
+    valor_abs = pd.to_numeric(
+        df_mb51["valor_estimado"],
+        errors="coerce",
+    ).fillna(0.0).abs()
+
+    mascara = (
+        (quantidade_abs > float(limite_quantidade_abs))
+        | (valor_abs > float(limite_valor_estimado_abs))
+    )
+
+    if not mascara.any():
+        return
+
+    anomalias = df_mb51.loc[mascara].copy()
+    detalhes = []
+
+    for indice, linha in anomalias.head(20).iterrows():
+        linha_excel = linha.get("_linha_excel")
+
+        if pd.isna(linha_excel):
+            try:
+                linha_excel = int(indice) + 2
+            except (TypeError, ValueError):
+                linha_excel = str(indice)
+
+        qtd = abs(float(linha.get("quantidade") or 0.0))
+        valor = abs(float(linha.get("valor_estimado") or 0.0))
+        motivos = []
+
+        if qtd > limite_quantidade_abs:
+            motivos.append(
+                f"quantidade {qtd:,.2f} > {limite_quantidade_abs:,.2f}"
+            )
+
+        if valor > limite_valor_estimado_abs:
+            motivos.append(
+                f"valor {valor:,.2f} > {limite_valor_estimado_abs:,.2f}"
+            )
+
+        detalhes.append(
+            " | ".join(
+                [
+                    f"linha={linha_excel}",
+                    f"material={linha.get('material', '')}",
+                    f"documento={linha.get('doc_material', '')}",
+                    f"item={linha.get('item_doc_material', '')}",
+                    f"quantidade={qtd:,.2f}",
+                    f"valor_estimado={valor:,.2f}",
+                    f"motivo={'; '.join(motivos)}",
+                ]
+            )
+        )
+
+    complemento = ""
+    if len(anomalias) > 20:
+        complemento = (
+            f"\n... e mais {len(anomalias) - 20} linha(s) anômala(s)."
+        )
+
+    raise ValueError(
+        "Carga MB51 cancelada por anomalia operacional. "
+        "Nenhum movimento deste lote foi gravado.\n"
+        f"Arquivo: {source_file}\n"
+        f"Limite de quantidade absoluta por linha: "
+        f"{limite_quantidade_abs:,.2f}\n"
+        f"Limite de valor estimado por linha: "
+        f"{limite_valor_estimado_abs:,.2f}\n"
+        + "\n".join(detalhes)
+        + complemento
+    )
+
 def upsert_mb51_mov(con: sqlite3.Connection, df_mb51: pd.DataFrame, source_file: str):
     """
     Upsert de movimentos MB51 na tabela fact_mb51_mov (entradas e saídas).
@@ -690,6 +791,13 @@ def upsert_mb51_mov(con: sqlite3.Connection, df_mb51: pd.DataFrame, source_file:
         custo_df["material"] = custo_df["material"].astype("string").apply(norm_material_text)
 
     tmp = df_mb51.copy()
+
+    # Preserva a referência aproximada à linha original do Excel antes de
+    # filtros e merges do pandas alterarem o índice do DataFrame.
+    tmp["_linha_excel"] = [
+        int(indice) + 2 if isinstance(indice, (int, np.integer)) else str(indice)
+        for indice in tmp.index
+    ]
 
     tmp["material"] = tmp["material"].astype("string").apply(norm_material_text)
     tmp["deposito"] = tmp["deposito"].astype("string").str.strip().str.upper()
@@ -719,6 +827,10 @@ def upsert_mb51_mov(con: sqlite3.Connection, df_mb51: pd.DataFrame, source_file:
     tmp["quantidade"] = pd.to_numeric(tmp["quantidade"], errors="coerce").fillna(0.0)
     tmp["custo_unit"] = pd.to_numeric(tmp["custo_unit"], errors="coerce").fillna(0.0)
     tmp["valor_estimado"] = tmp["quantidade"] * tmp["custo_unit"]
+
+    # Barreira de segurança: a validação acontece antes de qualquer gravação
+    # do lote MB51. Uma única linha anômala cancela o lote inteiro.
+    validar_anomalias_mb51(tmp, source_file)
 
     rows = []
     for _, r in tmp.iterrows():
@@ -2255,12 +2367,14 @@ def run(config_path, snapshot_date=None):
             WHERE snapshot_date = ?
         """, (sd,))
 
-        con.commit()
-
         print_step(f"SNAPSHOT LIMPO para {sd} (remoção antes de regravar)")
 
         # Agora grava o snapshot correto
         upsert_snapshot(con, sap_df, sd, sap_file.name)
+
+        # A exclusão e a regravação formam uma única unidade transacional.
+        # Se a regravação falhar, o snapshot anterior não é perdido.
+        con.commit()
 
         # ------------------------------------------------------------
         # 15) Dimensões auxiliares

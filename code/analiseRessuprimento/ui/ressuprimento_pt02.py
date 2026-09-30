@@ -163,6 +163,85 @@ def _mostrar_alertas_item(
         )
 
 
+def _mostrar_detalhe_material(item: pd.Series) -> None:
+    """Exibe os valores do radar sem recalcular ou gravar ações."""
+
+    unidade = item["unidade_operacional"]
+
+    st.divider()
+    st.subheader(
+        f"Detalhe do material — {item['material']}"
+    )
+    st.caption(
+        f"{item['descricao_material']} | "
+        f"Destino: {item['posicao']} | "
+        f"UMB: {unidade}"
+    )
+
+    demanda, picking, origem, sugestao = st.columns(4)
+
+    demanda.metric(
+        "Média mensal",
+        _formatar_quantidade(
+            item["media_mensal_saida"],
+            unidade,
+        ),
+    )
+    picking.metric(
+        "Saldo PT02 F5",
+        _formatar_quantidade_operacional(
+            item["saldo_pt02_f5"],
+            unidade,
+        ),
+    )
+    origem.metric(
+        "Saldo T001 F5",
+        _formatar_quantidade_operacional(
+            item["saldo_t001_f5"],
+            unidade,
+        ),
+    )
+    sugestao.metric(
+        "Quantidade sugerida",
+        _formatar_quantidade_operacional(
+            item["quantidade_sugerida"],
+            unidade,
+        ),
+    )
+
+    st.write(
+        "**Cálculo da necessidade:** "
+        f"{_formatar_quantidade(item['media_mensal_saida'], unidade)} "
+        "− "
+        f"{_formatar_quantidade_operacional(item['saldo_pt02_f5'], unidade)} "
+        "= "
+        f"{_formatar_quantidade(item['necessidade_ressuprimento'], unidade)}"
+    )
+
+    st.write(
+        "**Necessidade operacional:** "
+        f"{_formatar_quantidade_operacional(item['necessidade_operacional'], unidade)}"
+    )
+
+    st.write(
+        "**Demanda comercial:** "
+        f"{_formatar_quantidade(item['demanda_comercial'], unidade)} | "
+        "**Demanda técnica:** "
+        f"{_formatar_quantidade(item['demanda_tecnica'], unidade)}"
+    )
+
+    st.write(f"**Situação:** {item['status_operacional']}")
+
+    # A consulta também inclui situações que não permitem ressuprimento.
+    # Os alertas da fila são adequados somente às três situações abaixo.
+    if item["status_operacional"] in {
+        "RESSUPRIR", "RESSUPRIR PARCIAL", "SEM SALDO T001"
+    }:
+        _mostrar_alertas_item(item)
+    else:
+        st.info("Confira a situação calculada pelo radar para este material.")
+
+
 def render_ressuprimento_pt02(
     conn: sqlite3.Connection,
     *,
@@ -276,6 +355,63 @@ def render_ressuprimento_pt02(
         f"{total_riscos_pcp} possuem risco total ou residual para o PCP."
     )
 
+    # Reserva um quinto da largura para a consulta por código.
+    coluna_consulta, _ = st.columns([1, 4])
+    with coluna_consulta:
+        codigo_material = st.text_input(
+            "Consultar código do material",
+            value="",
+            placeholder="Ex.: 1020283",
+            help=(
+                "Digite o código completo. A consulta usa todo o radar, "
+                "sem o limite Top XX e sem restringir aos itens da fila. "
+                "Limpe o campo para voltar à fila de prioridades."
+            ),
+            key="consulta_material_ressuprimento_pt02",
+        ).strip()
+
+    if codigo_material:
+        # Busca exata no radar completo: inclui conflitos e materiais que
+        # não permitem ação. Não altera indicadores nem a ordem da fila.
+        consulta = radar.loc[
+            radar["material"].astype(str).str.strip().eq(codigo_material)
+        ].copy()
+
+        st.subheader(f"Consulta do material — {codigo_material}")
+        if consulta.empty:
+            st.info(
+                f"O material {codigo_material} não foi encontrado no radar "
+                "PT02 atual. Isso não confirma sua ausência no cadastro; "
+                "confira se possui posição PT02 definitiva nos dados atuais."
+            )
+            return
+
+        # Conflitos exibem todas as posições, sem sugestão operacional.
+        if consulta["duplicidade_pt02"].any():
+            st.error(
+                "CONFLITO DE POSIÇÕES PT02 — AÇÃO BLOQUEADA. "
+                "Regularize as posições na origem dos dados."
+            )
+            st.dataframe(
+                consulta[
+                    ["material", "descricao_material", "posicao",
+                     "id_posicao_material", "data_modificacao"]
+                ].rename(columns={
+                    "material": "Material",
+                    "descricao_material": "Descrição",
+                    "posicao": "Posição PT02",
+                    "id_posicao_material": "ID da posição",
+                    "data_modificacao": "Modificação BINMAT",
+                }),
+                width="stretch",
+                hide_index=True,
+            )
+            return
+
+        for _, item_consulta in consulta.iterrows():
+            _mostrar_detalhe_material(item_consulta)
+        return
+
     st.subheader("Fila de prioridades")
     st.caption(
         "Esta fila contém somente ressuprimentos completos ou parciais que "
@@ -351,68 +487,4 @@ def render_ressuprimento_pt02(
         return
 
     item = fila.iloc[linhas_selecionadas[0]]
-    unidade = item["unidade_operacional"]
-
-    st.divider()
-    st.subheader(
-        f"Detalhe da prioridade — {item['material']}"
-    )
-    st.caption(
-        f"{item['descricao_material']} | "
-        f"Destino: {item['posicao']} | "
-        f"UMB: {unidade}"
-    )
-
-    demanda, picking, origem, sugestao = st.columns(4)
-
-    demanda.metric(
-        "Média mensal",
-        _formatar_quantidade(
-            item["media_mensal_saida"],
-            unidade,
-        ),
-    )
-    picking.metric(
-        "Saldo PT02 F5",
-        _formatar_quantidade_operacional(
-            item["saldo_pt02_f5"],
-            unidade,
-        ),
-    )
-    origem.metric(
-        "Saldo T001 F5",
-        _formatar_quantidade_operacional(
-            item["saldo_t001_f5"],
-            unidade,
-        ),
-    )
-    sugestao.metric(
-        "Quantidade sugerida",
-        _formatar_quantidade_operacional(
-            item["quantidade_sugerida"],
-            unidade,
-        ),
-    )
-
-    st.write(
-        "**Cálculo da necessidade:** "
-        f"{_formatar_quantidade(item['media_mensal_saida'], unidade)} "
-        "− "
-        f"{_formatar_quantidade_operacional(item['saldo_pt02_f5'], unidade)} "
-        "= "
-        f"{_formatar_quantidade(item['necessidade_ressuprimento'], unidade)}"
-    )
-
-    st.write(
-        "**Necessidade operacional:** "
-        f"{_formatar_quantidade_operacional(item['necessidade_operacional'], unidade)}"
-    )
-
-    st.write(
-        "**Demanda comercial:** "
-        f"{_formatar_quantidade(item['demanda_comercial'], unidade)} | "
-        "**Demanda técnica:** "
-        f"{_formatar_quantidade(item['demanda_tecnica'], unidade)}"
-    )
-
-    _mostrar_alertas_item(item)
+    _mostrar_detalhe_material(item)

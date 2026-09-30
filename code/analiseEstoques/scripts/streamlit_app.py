@@ -139,6 +139,111 @@ def _fmt_pct(x, nd=2):
         return ""
 
 
+def adicionar_indicador_giro(
+    df: pd.DataFrame,
+    meta_giro: float,
+    coluna_entradas: str = "entradas_val",
+    coluna_saldo: str = "saldo_atual_sap_val",
+) -> pd.DataFrame:
+    """
+    Acrescenta o giro mensal e sua situação a uma tabela agregada.
+
+    O cálculo replica o indicador principal do BI:
+
+        giro atual = entradas SAP do mês / saldo atual SAP
+
+    A divisão é feita depois da agregação por BU ou Segmento. Assim, o
+    resultado representa a relação entre os totais do grupo, e não uma
+    média simples dos giros dos materiais.
+
+    Quando o saldo atual é zero ou negativo, o giro não é calculado para
+    evitar uma interpretação artificial de divisão por zero.
+    """
+    resultado = df.copy()
+
+    entradas = pd.to_numeric(
+        resultado[coluna_entradas],
+        errors="coerce",
+    ).fillna(0.0)
+
+    saldo = pd.to_numeric(
+        resultado[coluna_saldo],
+        errors="coerce",
+    ).fillna(0.0)
+
+    resultado["giro_atual"] = np.nan
+    saldo_positivo = saldo > 0
+    resultado.loc[saldo_positivo, "giro_atual"] = (
+        entradas.loc[saldo_positivo]
+        / saldo.loc[saldo_positivo]
+    )
+
+    resultado["status_giro"] = np.select(
+        [
+            resultado["giro_atual"].isna(),
+            resultado["giro_atual"] >= float(meta_giro),
+        ],
+        [
+            "⚪ NÃO CALCULADO",
+            "🟢 META ATINGIDA",
+        ],
+        default="🔴 ABAIXO DA META",
+    )
+
+    return resultado
+
+
+def estilizar_indicador_giro(
+    df: pd.DataFrame,
+    meta_giro: float,
+) -> pd.io.formats.style.Styler:
+    """Aplica as cores sem alterar os valores usados nos cálculos."""
+
+    def estilo_giro(valor):
+        if pd.isna(valor):
+            return (
+                "background-color: #E5E7EB; "
+                "color: #374151; font-weight: 600"
+            )
+
+        if float(valor) >= float(meta_giro):
+            return (
+                "background-color: #D1FAE5; "
+                "color: #065F46; font-weight: 700"
+            )
+
+        return (
+            "background-color: #FEE2E2; "
+            "color: #991B1B; font-weight: 700"
+        )
+
+    def estilo_status(valor):
+        texto = str(valor)
+
+        if "META ATINGIDA" in texto:
+            return (
+                "background-color: #D1FAE5; "
+                "color: #065F46; font-weight: 700"
+            )
+
+        if "ABAIXO DA META" in texto:
+            return (
+                "background-color: #FEE2E2; "
+                "color: #991B1B; font-weight: 700"
+            )
+
+        return (
+            "background-color: #E5E7EB; "
+            "color: #374151; font-weight: 600"
+        )
+
+    return (
+        df.style
+        .map(estilo_giro, subset=["Giro atual"])
+        .map(estilo_status, subset=["Status giro"])
+    )
+
+
 def df_pt(df: pd.DataFrame) -> pd.DataFrame:
     """
     Renomeia colunas apenas para EXIBIÇÃO/EXPORT.
@@ -1318,7 +1423,10 @@ def run():
         if df_bu.empty:
             st.info("Sem dados suficientes para calcular eficiência por BU.")
         else:
-            df_bu_view = df_bu.copy()
+            df_bu_view = adicionar_indicador_giro(
+                df_bu,
+                meta_giro=float(meta_giro),
+            )
 
             df_bu_view["Baseline inicial (R$)"] = df_bu_view["baseline_val"].map(lambda x: _fmt_ptbr_num(x, 2))
             df_bu_view["Saídas MB51 (R$)"] = df_bu_view["saidas_val"].map(lambda x: _fmt_ptbr_num(x, 2))
@@ -1330,6 +1438,8 @@ def run():
             df_bu_view["Base disponível (R$)"] = df_bu_view["base_disponivel_val"].map(lambda x: _fmt_ptbr_num(x, 2))
             df_bu_view["Consumo SAP (R$)"] = df_bu_view["consumo_real_sap_val"].map(lambda x: _fmt_ptbr_num(x, 2))
             df_bu_view["Saldo atual (SAP) (R$)"] = df_bu_view["saldo_atual_sap_val"].map(lambda x: _fmt_ptbr_num(x, 2))
+            df_bu_view["Giro atual"] = df_bu_view["giro_atual"].round(2)
+            df_bu_view["Status giro"] = df_bu_view["status_giro"]
             df_bu_view["Eficiência"] = df_bu_view["eficiencia_pct"].map(lambda x: _fmt_pct(x, 1))
             df_bu_view["% part. consumo"] = df_bu_view["participacao_saida_pct"].map(lambda x: _fmt_pct(x, 1))
             df_bu_view["% part. baseline"] = df_bu_view["participacao_baseline_pct"].map(lambda x: _fmt_pct(x, 1))
@@ -1338,8 +1448,7 @@ def run():
                 "area_negocio": "BU"
             })
 
-            st.dataframe(
-                df_bu_view[
+            df_bu_exibicao = df_bu_view[
             [
                 "BU",
                 "Baseline inicial (R$)",
@@ -1347,13 +1456,43 @@ def run():
                 "Base disponível (R$)",
                 "Consumo SAP (R$)",
                 "Saldo atual (SAP) (R$)",
+                "Giro atual",
+                "Status giro",
                 "Eficiência",
                 "% part. consumo",
                 "% part. baseline",
             ]
-                ],
+            ]
+
+            st.dataframe(
+                estilizar_indicador_giro(
+                    df_bu_exibicao,
+                    meta_giro=float(meta_giro),
+                ),
+                column_config={
+                    "Giro atual": st.column_config.NumberColumn(
+                        "Giro atual",
+                        format="%.2f",
+                        help=(
+                            "Entradas SAP do mês divididas pelo saldo atual "
+                            "SAP. Meta definida na barra lateral."
+                        ),
+                    ),
+                    "Status giro": st.column_config.TextColumn(
+                        "Status giro",
+                        help=(
+                            "Verde: meta atingida. Vermelho: abaixo da meta. "
+                            "Cinza: giro não calculado por saldo não positivo."
+                        ),
+                    ),
+                },
                 width="stretch",
                 hide_index=True,
+            )
+
+            st.caption(
+                f"Giro atual = Entradas SAP do mês ÷ Saldo atual SAP. "
+                f"Meta vigente: {float(meta_giro):.2f}."
             )
 
             
@@ -1512,7 +1651,10 @@ def run():
                     # _fmt_pct(), pois essas funções transformariam os valores
                     # em texto e fariam o dataframe tratá-los como strings.
                     # -----------------------------------------------------
-                    df_segmento_view = df_segmento_filtrado.copy()
+                    df_segmento_view = adicionar_indicador_giro(
+                        df_segmento_filtrado,
+                        meta_giro=float(meta_giro),
+                    )
 
                     # As colunas monetárias são arredondadas somente na
                     # camada visual. Os valores originais permanecem intactos
@@ -1538,6 +1680,14 @@ def run():
 
                     df_segmento_view["Saldo atual SAP (R$)"] = (
                         df_segmento_view["saldo_atual_sap_val"].round(2)
+                    )
+
+                    df_segmento_view["Giro atual"] = (
+                        df_segmento_view["giro_atual"].round(2)
+                    )
+
+                    df_segmento_view["Status giro"] = (
+                        df_segmento_view["status_giro"]
                     )
 
                     df_segmento_view["Eficiência"] = (
@@ -1577,8 +1727,7 @@ def run():
                         ],
                     )
 
-                    st.dataframe(
-                        df_segmento_view[
+                    df_segmento_exibicao = df_segmento_view[
                             [
                                 "BU",
                                 "Diretoria",
@@ -1588,11 +1737,19 @@ def run():
                                 "Base disponível (R$)",
                                 "Consumo SAP (R$)",
                                 "Saldo atual SAP (R$)",
+                                "Giro atual",
+                                "Status giro",
                                 "Eficiência",
                                 "% part. consumo",
                                 "% part. baseline",
                             ]
-                        ],
+                    ]
+
+                    st.dataframe(
+                        estilizar_indicador_giro(
+                            df_segmento_exibicao,
+                            meta_giro=float(meta_giro),
+                        ),
                         column_config={
                             "Baseline inicial (R$)": st.column_config.NumberColumn(
                                 "Baseline inicial (R$)",
@@ -1614,6 +1771,22 @@ def run():
                                 "Saldo atual SAP (R$)",
                                 format="localized",
                             ),
+                            "Giro atual": st.column_config.NumberColumn(
+                                "Giro atual",
+                                format="%.2f",
+                                help=(
+                                    "Entradas SAP do mês divididas pelo saldo "
+                                    "atual SAP. Meta definida na barra lateral."
+                                ),
+                            ),
+                            "Status giro": st.column_config.TextColumn(
+                                "Status giro",
+                                help=(
+                                    "Verde: meta atingida. Vermelho: abaixo da "
+                                    "meta. Cinza: giro não calculado por saldo "
+                                    "não positivo."
+                                ),
+                            ),
                             "Eficiência": st.column_config.NumberColumn(
                                 "Eficiência",
                                 format="percent",
@@ -1629,6 +1802,11 @@ def run():
                         },
                         width="stretch",
                         hide_index=True,
+                    )
+
+                    st.caption(
+                        f"Giro atual = Entradas SAP do mês ÷ Saldo atual "
+                        f"SAP. Meta vigente: {float(meta_giro):.2f}."
                     )
 
             st.markdown("### Participação das BUs nas consumos do mês")
@@ -2416,4 +2594,3 @@ def run():
             # também previne referências obsoletas ao XLSX mantido em memória.
             on_click="ignore",
         )
-

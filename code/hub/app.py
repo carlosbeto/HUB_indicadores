@@ -5,6 +5,7 @@ import inspect
 import streamlit as st
 
 from hub.lib.config import load_config
+from hub.lib.session_monitor import render_session_counter
 
 
 def _fatal(title: str, exc: Exception) -> None:
@@ -25,7 +26,7 @@ def _call_compat(fn, cfg: dict) -> None:
     if len(params) == 0:
         fn()
     else:
-        fn(cfg)    
+        fn(cfg)
 
 
 def _render_home() -> None:
@@ -92,6 +93,10 @@ def main() -> None:
 
     # Router
     page = st.session_state.get("hub_page", "home")
+
+    # Monitoramento anônimo de sessões ativas.
+    st.sidebar.divider()
+    render_session_counter(page)
 
     try:
         if page == "home":

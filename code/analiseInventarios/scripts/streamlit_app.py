@@ -116,20 +116,6 @@ def read_csv_safe(path: Path) -> pd.DataFrame:
         return pd.DataFrame()
     return pd.read_csv(path)
 
-
-
-
-
-
-
-
-st.sidebar.header("Arquivos de saída")
-st.sidebar.write("Pasta:", str(OUTPUT_DIR))
-st.sidebar.write("ewm_cobertura_semanal.csv:", EWM_CSV.exists())
-st.sidebar.write("mm_risco_snapshot.csv:", RISK_CSV.exists())
-st.sidebar.write("mm_simulacao_topN.csv:", SIM_CSV.exists())
-st.sidebar.write("mm_top200_valor_nao_inventariado.csv:", TOP_CSV.exists())
-
 df_ewm = read_csv_safe(EWM_CSV)
 df_risk = read_csv_safe(RISK_CSV)
 df_sim = read_csv_safe(SIM_CSV)
@@ -262,38 +248,38 @@ with tab1:
     with st.expander("Como interpretar este painel"):
         st.markdown(
             """
-            **Objetivo do painel**  
+            **Objetivo do painel**
             Apresentar uma visão geral do ciclo de inventário, combinando volume de itens, impacto financeiro e priorização.
 
-            **Contexto do ciclo**  
+            **Contexto do ciclo**
             Mostra a base de referência da análise:
             - Snapshot do estoque (data e depósito)
             - Última semana processada
             - Período atual do ciclo
 
-            **Cobertura física**  
+            **Cobertura física**
             Indica o avanço da contagem em quantidade de itens:
             - SKUs atuais → total de itens no estoque
             - SKUs já cobertos → itens já contados
             - SKUs não contados → itens ainda pendentes
 
-            **Exposição financeira**  
+            **Exposição financeira**
             Mostra o impacto financeiro do estoque:
             - Valor total → valor total do estoque
             - Valor não contado → risco atual
             - Valor já coberto → parte já validada
             - % não contado → nível de exposição
 
-            **Impacto da priorização**  
+            **Impacto da priorização**
             Mostra o quanto o risco pode ser reduzido ao focar nos itens mais relevantes:
             - Top 50 → redução potencial atacando os 50 principais itens
             - Top 100 → redução acumulada
             - Top 200 → eliminação total do risco
 
-            **Como interpretar na prática**  
-            - Muitos SKUs não contados + alto valor → risco elevado  
-            - Cobertura baixa → necessidade de avanço operacional  
-            - Alto ganho nos Top N → priorização bem direcionada  
+            **Como interpretar na prática**
+            - Muitos SKUs não contados + alto valor → risco elevado
+            - Cobertura baixa → necessidade de avanço operacional
+            - Alto ganho nos Top N → priorização bem direcionada
             """
         )
 
@@ -362,7 +348,7 @@ with tab1:
         f1.metric("SKUs atuais", fmt_int(skus_atuais))
         f2.metric("SKUs já cobertos", fmt_int(skus_cobertos))
         f3.metric("SKUs não contados", fmt_int(skus_nao_contados))
-        
+
         st.divider()
 
         st.markdown("### Exposição financeira")

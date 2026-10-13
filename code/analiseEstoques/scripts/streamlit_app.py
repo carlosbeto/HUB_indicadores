@@ -1293,10 +1293,9 @@ def run():
     # ----------------------------
     st.sidebar.header("Parâmetros")
 
-    db_path = st.sidebar.text_input(
-        "DB (SQLite)",
-        value=str(DEFAULT_DB),
-    )
+    # O caminho do banco é definido internamente pela configuração do HUB.
+    # Não deve ser exibido nem editado pela interface do operador.
+    db_path = str(DEFAULT_DB)
 
     meta_giro = st.sidebar.number_input(
         "Meta de giro (mês)",
@@ -1443,7 +1442,7 @@ def run():
             df_bu_view["Eficiência"] = df_bu_view["eficiencia_pct"].map(lambda x: _fmt_pct(x, 1))
             df_bu_view["% part. consumo"] = df_bu_view["participacao_saida_pct"].map(lambda x: _fmt_pct(x, 1))
             df_bu_view["% part. baseline"] = df_bu_view["participacao_baseline_pct"].map(lambda x: _fmt_pct(x, 1))
-            
+
             df_bu_view = df_bu_view.rename(columns={
                 "area_negocio": "BU"
             })
@@ -1495,7 +1494,7 @@ def run():
                 f"Meta vigente: {float(meta_giro):.2f}."
             )
 
-            
+
             st.markdown("### Detalhamento por Diretoria e Segmento")
 
             somente_saldo_acima_baseline = st.checkbox(

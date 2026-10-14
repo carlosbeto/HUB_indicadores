@@ -1239,99 +1239,187 @@ def backfill_kpi_diario_mes(con: sqlite3.Connection, deposito: str, d: date):
             print_step(f"KPI_DIARIO: erro em {deposito} {snap_date}: {type(e).__name__}: {e}")
 
 
-def ensure_baseline(con: sqlite3.Connection, deposito: str, d: date, source_file: str) -> bool:
+def ensure_baseline(
+    con: sqlite3.Connection,
+    deposito: str,
+    d: date,
+    source_file: str,
+) -> bool:
     """
-    Garante a existência do baseline do mês (baseline_mensal) para um depósito.
+    Garante a existência do baseline mensal de um depósito.
 
-    Conceito:
-    - Baseline = "ponto de partida" do mês para comparar evolução e calcular KPI.
-    - Regra do projeto: baseline deve representar o mês no primeiro dia útil.
+    Regra principal:
+    - O baseline do mês atual é o último snapshot disponível no mês anterior.
+    - O fechamento anterior torna-se o ponto inicial oficial do novo mês.
 
-    Estratégia usada (V3):
-    1) Se já existe baseline para (mes_ref, deposito), não faz nada (retorna False).
-    2) Determina o primeiro dia útil do mês (first_business_day(d)).
-    3) Se estamos exatamente no primeiro dia útil:
-       - baseline_date = data de hoje (d)
-    4) Se não estamos no primeiro dia útil:
-       - baseline_date = menor snapshot_date disponível no mês para o depósito
-         (primeiro snapshot gravado do mês)
-       - Se não existir snapshot no mês, não cria baseline.
+    Regra de contingência:
+    - Quando não existe snapshot no mês anterior, utiliza o primeiro
+      snapshot disponível no próprio mês.
+    - Essa contingência atende o primeiro mês da série histórica ou uma
+      eventual ausência de fechamento anterior.
 
-    Nota importante:
-    - Esta função depende de fact_estoque_snapshot já estar populada.
-    - Ela é chamada no run() depois do upsert_snapshot, então normalmente existe snapshot.
+    Proteções:
+    - Não sobrescreve um baseline já existente.
+    - Não cria baseline quando não existe qualquer snapshot aplicável.
+    - Não grava quantidade ou valor nulos.
+    - Registra o arquivo pertencente ao snapshot realmente utilizado.
 
     Retorno:
-    - True  => baseline criado agora
-    - False => baseline já existia ou não foi possível criar (sem dados)
+    - True: baseline criado nesta execução.
+    - False: baseline já existia ou não havia snapshot disponível.
     """
 
-    # Garante que tabelas de baseline existem
+    # Garante a existência da tabela baseline_mensal.
     ensure_baseline_tables(con)
 
-    # Mês referência (YYYY-MM)
+    # Mês que receberá o baseline, no formato YYYY-MM.
     mref = mes_ref(d)
 
     # ------------------------------------------------------------
-    # 1) Se baseline já existe para o mês/depósito, não recria
+    # 1) Preserva baseline já existente
     # ------------------------------------------------------------
-    cur = con.execute(
-        "SELECT 1 FROM baseline_mensal WHERE mes_ref=? AND deposito=? LIMIT 1",
-        (mref, deposito)
-    )
-    if cur.fetchone():
+    baseline_existente = con.execute(
+        """
+        SELECT 1
+        FROM baseline_mensal
+        WHERE mes_ref = ?
+          AND deposito = ?
+        LIMIT 1
+        """,
+        (mref, deposito),
+    ).fetchone()
+
+    if baseline_existente:
         return False
 
     # ------------------------------------------------------------
-    # 2) Define baseline_date
+    # 2) Determina os limites do mês anterior
     # ------------------------------------------------------------
-    # first_business_day(d) deve retornar o primeiro dia útil DO MÊS de d
-    bday = first_business_day(d)
+    inicio_mes_atual = d.replace(day=1)
+    fim_mes_anterior = inicio_mes_atual - timedelta(days=1)
+    inicio_mes_anterior = fim_mes_anterior.replace(day=1)
 
-    # Se hoje é o primeiro dia útil do mês, baseline é hoje
-    if d == bday:
-        baseline_date = to_date_str(d)
+    inicio_anterior_str = to_date_str(inicio_mes_anterior)
+    fim_anterior_str = to_date_str(fim_mes_anterior)
 
-    # Caso contrário, usamos o primeiro snapshot disponível no mês (MIN(snapshot_date))
-    else:
-        baseline_date = con.execute("""
+    # Última fotografia disponível dentro do mês anterior.
+    baseline_date = con.execute(
+        """
+        SELECT MAX(snapshot_date)
+        FROM fact_estoque_snapshot
+        WHERE deposito = ?
+          AND snapshot_date >= ?
+          AND snapshot_date <= ?
+        """,
+        (
+            deposito,
+            inicio_anterior_str,
+            fim_anterior_str,
+        ),
+    ).fetchone()[0]
+
+    origem_baseline = "FECHAMENTO_MES_ANTERIOR"
+
+    # ------------------------------------------------------------
+    # 3) Contingência: primeiro snapshot do próprio mês
+    # ------------------------------------------------------------
+    if not baseline_date:
+        baseline_date = con.execute(
+            """
             SELECT MIN(snapshot_date)
             FROM fact_estoque_snapshot
-            WHERE deposito=? AND snapshot_date LIKE ?;
-        """, (deposito, f"{mref}-%")).fetchone()[0]
+            WHERE deposito = ?
+              AND snapshot_date LIKE ?
+            """,
+            (
+                deposito,
+                f"{mref}-%",
+            ),
+        ).fetchone()[0]
 
-        # Se não há snapshot no mês, não dá para criar baseline
-        if not baseline_date:
-            return False
+        origem_baseline = "PRIMEIRO_SNAPSHOT_MES_ATUAL"
+
+    # Sem fechamento anterior e sem snapshot atual:
+    # não cria uma linha vazia em baseline_mensal.
+    if not baseline_date:
+        print_step(
+            f"BASELINE não criado para {deposito} em {mref}: "
+            "nenhum snapshot disponível"
+        )
+        return False
 
     # ------------------------------------------------------------
-    # 3) Calcula totais do baseline (qtd_total e val_total)
+    # 4) Calcula os totais e identifica os arquivos da fotografia
     # ------------------------------------------------------------
-    row = con.execute("""
-        SELECT SUM(qtd_total) AS qtd_total, SUM(val_total) AS val_total
+    row = con.execute(
+        """
+        SELECT
+            COALESCE(SUM(qtd_total), 0),
+            COALESCE(SUM(val_total), 0),
+            GROUP_CONCAT(DISTINCT source_file)
         FROM fact_estoque_snapshot
-        WHERE snapshot_date=? AND deposito=?;
-    """, (baseline_date, deposito)).fetchone()
+        WHERE snapshot_date = ?
+          AND deposito = ?
+        """,
+        (
+            baseline_date,
+            deposito,
+        ),
+    ).fetchone()
 
-    qtd_base = row[0] if row else None
-    val_base = row[1] if row else None
+    if not row:
+        return False
+
+    qtd_base = float(row[0] or 0.0)
+    val_base = float(row[1] or 0.0)
+    arquivos_snapshot = row[2]
+
+    # O arquivo passado pelo run() só é usado como contingência quando
+    # a fotografia selecionada não possui source_file registrado.
+    if arquivos_snapshot:
+        baseline_source_file = str(arquivos_snapshot)
+    elif origem_baseline == "PRIMEIRO_SNAPSHOT_MES_ATUAL":
+        baseline_source_file = source_file
+    else:
+        baseline_source_file = (
+            "FECHAMENTO_MES_ANTERIOR_SEM_ARQUIVO_IDENTIFICADO"
+        )
 
     # ------------------------------------------------------------
-    # 4) Insere baseline_mensal
+    # 5) Insere o baseline mensal
     # ------------------------------------------------------------
-    con.execute("""
+    con.execute(
+        """
         INSERT INTO baseline_mensal (
-            mes_ref, deposito, baseline_date, qtd_base_total, val_base_total, source_file, load_ts
-        ) VALUES (?,?,?,?,?,?,?)
-    """, (
-        mref, deposito, baseline_date,
-        qtd_base, val_base,
-        source_file,
-        now_ts()
-    ))
+            mes_ref,
+            deposito,
+            baseline_date,
+            qtd_base_total,
+            val_base_total,
+            source_file,
+            load_ts
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            mref,
+            deposito,
+            baseline_date,
+            qtd_base,
+            val_base,
+            baseline_source_file,
+            now_ts(),
+        ),
+    )
 
-    # Log para auditoria (ótimo para explicar o comportamento para supervisão)
-    print_step(f"BASELINE criado para {deposito} em {mref}: baseline_date={baseline_date}")
+    print_step(
+        f"BASELINE criado para {deposito} em {mref}: "
+        f"baseline_date={baseline_date}; "
+        f"origem={origem_baseline}; "
+        f"qtd={qtd_base}; "
+        f"valor={val_base}"
+    )
+
     return True
 
 
@@ -2284,7 +2372,7 @@ def run(config_path, snapshot_date=None):
             print_step(f"MB51: usando arquivo {mb51_file.name}")
             mb51_df = load_mb51(mb51_file, sheet_name=mb51_sheet_name)
             print_step(f"MB51: linhas lidas do Excel: {len(mb51_df)}")
-            
+
             # LOG MB51 (Excel): faixa de datas e dias distintos (antes dos filtros)
             if (not mb51_df.empty) and ("data_lancamento" in mb51_df.columns):
                 _d = pd.to_datetime(mb51_df["data_lancamento"], errors="coerce").dropna()

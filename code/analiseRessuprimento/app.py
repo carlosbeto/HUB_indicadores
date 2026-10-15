@@ -60,7 +60,7 @@ def main() -> None:
             "Navegação",
             options=[
                 "Ressuprimento PT02",
-                "Risco de abastecimento — PCP",
+                "Risco de abastecimento — PCM",
                 "Parametrização BINMAT",
             ],
             key="pagina_analise_ressuprimento",
@@ -71,7 +71,7 @@ def main() -> None:
                 conn,
                 usuario=usuario,
             )
-        elif pagina == "Risco de abastecimento — PCP":
+        elif pagina == "Risco de abastecimento — PCM":
             render_risco_abastecimento_pcp(
                 conn,
                 usuario=usuario,

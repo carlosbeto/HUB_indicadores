@@ -44,8 +44,13 @@ def criar_banco_teste() -> sqlite3.Connection:
             data_lancamento TEXT NOT NULL,
             deposito TEXT NOT NULL,
             material TEXT NOT NULL,
-            deb_cred TEXT NOT NULL,
+                        deb_cred TEXT NOT NULL,
             ordem TEXT,
+
+            -- Campo existente na tabela real e utilizado pelo índice
+            -- que permite desconsiderar os movimentos 343 e 344.
+            tipo_movimento TEXT,
+
             quantidade REAL,
             valor_estimado REAL
         )

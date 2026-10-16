@@ -9,6 +9,8 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import plotly.express as px
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 import os
 import json
@@ -1276,6 +1278,172 @@ def list_meses_disponiveis(db_path_str: str) -> list[str]:
     return [r[0] for r in rows]
 
 
+@_cache_data(ttl=120)
+def load_evolucao_mensal_mast(
+    db_path_str: str,
+    meses_ref: tuple[str, ...],
+    desconsiderar_mov_343_344: bool = False,
+) -> pd.DataFrame:
+    """
+    Carrega a evolução financeira mensal do depósito MAST.
+
+    Para cada mês solicitado, retorna:
+    - entradas financeiras apuradas na MB51;
+    - saldo do último snapshot disponível no mês;
+    - giro do BI, calculado como entradas divididas pelo saldo.
+
+    A consulta foi consolidada para percorrer cada tabela somente uma vez
+    no período selecionado. Isso evita repetir consultas pesadas para cada
+    mês, principalmente quando o banco está armazenado na rede.
+    """
+
+    colunas = [
+        "mes_ref",
+        "snapshot_date",
+        "entradas_val",
+        "saldo_val",
+        "giro",
+    ]
+
+    if not meses_ref:
+        return pd.DataFrame(columns=colunas)
+
+    db_path = Path(db_path_str)
+
+    # Remove eventuais duplicidades e garante ordem cronológica.
+    meses_ordenados = tuple(sorted(set(meses_ref)))
+
+    # Os períodos usados pela interface são contínuos. Por isso, basta
+    # consultar do início do primeiro mês ao início do mês posterior ao último.
+    inicio_periodo = month_bounds(meses_ordenados[0])[0]
+    fim_periodo = month_bounds(meses_ordenados[-1])[1]
+
+    filtro_movimento = ""
+
+    if desconsiderar_mov_343_344:
+        filtro_movimento = """
+          AND TRIM(COALESCE(tipo_movimento, '')) NOT IN ('343', '344')
+        """
+
+    with connect_readonly(db_path) as con:
+        # ------------------------------------------------------------
+        # 1) Saldos mensais
+        # ------------------------------------------------------------
+        # Primeiro identifica o último snapshot de cada mês. Em seguida,
+        # soma todas as linhas pertencentes àquela fotografia.
+        #
+        # A tabela de snapshots é percorrida uma única vez no período,
+        # em vez de duas vezes para cada mês.
+        saldos_rows = con.execute(
+            """
+            WITH ultimos_snapshots AS (
+                SELECT
+                    SUBSTR(snapshot_date, 1, 7) AS mes_ref,
+                    MAX(snapshot_date) AS snapshot_date
+                FROM fact_estoque_snapshot
+                WHERE deposito = 'MAST'
+                  AND snapshot_date >= ?
+                  AND snapshot_date < ?
+                GROUP BY SUBSTR(snapshot_date, 1, 7)
+            )
+            SELECT
+                ultimos.mes_ref,
+                ultimos.snapshot_date,
+                COALESCE(SUM(snapshot.val_total), 0) AS saldo_val
+            FROM ultimos_snapshots AS ultimos
+            INNER JOIN fact_estoque_snapshot AS snapshot
+                ON snapshot.deposito = 'MAST'
+               AND snapshot.snapshot_date = ultimos.snapshot_date
+            GROUP BY
+                ultimos.mes_ref,
+                ultimos.snapshot_date
+            ORDER BY
+                ultimos.mes_ref;
+            """,
+            (inicio_periodo, fim_periodo),
+        ).fetchall()
+
+        # ------------------------------------------------------------
+        # 2) Entradas mensais
+        # ------------------------------------------------------------
+        # Regra homologada do BI:
+        # - débito/crédito igual a "S";
+        # - ordem vazia;
+        # - filtro opcional dos movimentos 343 e 344.
+        #
+        # Toda a MB51 do período é agregada em uma única consulta.
+        entradas_rows = con.execute(
+            f"""
+            SELECT
+                SUBSTR(data_lancamento, 1, 7) AS mes_ref,
+                COALESCE(
+                    SUM(valor_estimado),
+                    0
+                ) AS entradas_val
+            FROM fact_mb51_mov
+            WHERE deposito = 'MAST'
+              AND deb_cred = 'S'
+              AND TRIM(COALESCE(ordem, '')) = ''
+              {filtro_movimento}
+              AND data_lancamento >= ?
+              AND data_lancamento < ?
+            GROUP BY SUBSTR(data_lancamento, 1, 7)
+            ORDER BY mes_ref;
+            """,
+            (inicio_periodo, fim_periodo),
+        ).fetchall()
+
+    # Dicionários permitem combinar rapidamente as duas consultas pelo mês.
+    saldos_por_mes = {
+        str(mes): {
+            "snapshot_date": str(snapshot_date),
+            "saldo_val": float(saldo_val or 0),
+        }
+        for mes, snapshot_date, saldo_val in saldos_rows
+    }
+
+    entradas_por_mes = {
+        str(mes): float(entradas_val or 0)
+        for mes, entradas_val in entradas_rows
+    }
+
+    registros: list[dict] = []
+
+    for mes_ref in meses_ordenados:
+        saldo_mes = saldos_por_mes.get(mes_ref)
+
+        # Sem snapshot não existe saldo confiável nem giro para o mês.
+        if saldo_mes is None:
+            continue
+
+        saldo_val = float(saldo_mes["saldo_val"])
+        entradas_val = float(entradas_por_mes.get(mes_ref, 0.0))
+
+        giro = (
+            entradas_val / saldo_val
+            if saldo_val != 0
+            else None
+        )
+
+        registros.append(
+            {
+                "mes_ref": mes_ref,
+                "snapshot_date": saldo_mes["snapshot_date"],
+                "entradas_val": round(entradas_val, 2),
+                "saldo_val": round(saldo_val, 2),
+                "giro": (
+                    None
+                    if giro is None
+                    else round(float(giro), 4)
+                ),
+            }
+        )
+
+    return pd.DataFrame(
+        registros,
+        columns=colunas,
+    ).reset_index(drop=True)
+
 # =============================================================================
 # APP (tudo que usa st.* fica aqui dentro)
 # =============================================================================
@@ -1341,11 +1509,12 @@ def run():
     # ----------------------------
     # Tabs
     # ----------------------------
-    tab1, tab2, tab3 = st.tabs(
+    tab1, tab2, tab3, tab4 = st.tabs(
         [
             "Mensal (KPI)",
             "Diário (séries)",
             "Ataque (quadrantes)",
+            "Evolução mensal",
         ]
     )
 
@@ -2593,3 +2762,552 @@ def run():
             # também previne referências obsoletas ao XLSX mantido em memória.
             on_click="ignore",
         )
+
+    with tab4:
+        st.markdown("### Evolução mensal — Entradas, Saldo e Giro")
+
+        st.caption(
+            "Acompanhamento financeiro do MAST com base na mesma regra "
+            "homologada do BI mensal."
+        )
+
+        # O mês atual é identificado pelo relógio do computador que executa
+        # o Streamlit. Ele pode ser mostrado como parcial, mas não participa
+        # da tendência enquanto ainda não estiver encerrado.
+        mes_atual = datetime.now().strftime("%Y-%m")
+        anos_disponiveis = sorted({mes[:4] for mes in meses})
+
+        controle_periodo, controle_ano = st.columns([1, 1])
+
+        with controle_periodo:
+            tipo_periodo = st.radio(
+                "Período de visualização",
+                options=[
+                    "Últimos 12 meses",
+                    "Ano calendário",
+                ],
+                horizontal=True,
+                key="evolucao_tipo_periodo",
+            )
+
+        with controle_ano:
+            if tipo_periodo == "Ano calendário":
+                # Por padrão, abre o ano correspondente ao mês selecionado
+                # na barra lateral, quando ele existir na base.
+                ano_padrao = mes_ref[:4]
+
+                indice_ano = (
+                    anos_disponiveis.index(ano_padrao)
+                    if ano_padrao in anos_disponiveis
+                    else len(anos_disponiveis) - 1
+                )
+
+                ano_selecionado = st.selectbox(
+                    "Ano",
+                    options=anos_disponiveis,
+                    index=indice_ano,
+                    key="evolucao_ano",
+                )
+            else:
+                ano_selecionado = None
+                st.caption(
+                    "O período deslizante usa os 12 meses mais recentes "
+                    "disponíveis no banco."
+                )
+
+        # Meses futuros, caso existam por alguma carga antecipada, não entram
+        # no acompanhamento realizado.
+        meses_ate_atual = [
+            mes
+            for mes in meses
+            if mes <= mes_atual
+        ]
+
+        if tipo_periodo == "Últimos 12 meses":
+            meses_candidatos = meses_ate_atual
+        else:
+            meses_candidatos = [
+                mes
+                for mes in meses_ate_atual
+                if mes.startswith(str(ano_selecionado))
+            ]
+
+        # A opção só é exibida quando o mês corrente realmente existe na base.
+        # O padrão é não incluir o mês parcial, evitando distorção na leitura.
+        incluir_mes_atual = False
+
+        if mes_atual in meses_candidatos:
+            incluir_mes_atual = st.checkbox(
+                "Incluir mês atual (parcial)",
+                value=False,
+                help=(
+                    "Mostra o mês em andamento no gráfico e nos indicadores. "
+                    "Mesmo quando exibido, ele não participa da linha de tendência."
+                ),
+                key="evolucao_incluir_mes_atual",
+            )
+
+        meses_periodo = [
+            mes
+            for mes in meses_candidatos
+            if incluir_mes_atual or mes != mes_atual
+        ]
+
+        # O corte dos 12 meses acontece depois da eventual exclusão do mês
+        # corrente. Assim, o padrão mostra até 12 meses efetivamente fechados.
+        if tipo_periodo == "Últimos 12 meses":
+            meses_periodo = meses_periodo[-12:]
+
+        df_evolucao = load_evolucao_mensal_mast(
+            db_path,
+            tuple(meses_periodo),
+            desconsiderar_mov_343_344,
+        )
+
+        if df_evolucao.empty:
+            st.warning(
+                "Não há snapshots mensais suficientes para montar "
+                "a evolução no período selecionado."
+            )
+        else:
+            # O rótulo MM/AAAA não depende da configuração regional do Windows.
+            # Um asterisco identifica visualmente o mês ainda em andamento.
+            df_evolucao["parcial"] = (
+                df_evolucao["mes_ref"] == mes_atual
+            )
+
+            df_evolucao["mes_label"] = (
+                df_evolucao["mes_ref"]
+                .str.slice(5, 7)
+                .str.cat(
+                    df_evolucao["mes_ref"].str.slice(0, 4),
+                    sep="/",
+                )
+            )
+
+            df_evolucao.loc[
+                df_evolucao["parcial"],
+                "mes_label",
+            ] += " *"
+
+            # A regressão linear é calculada somente com meses fechados.
+            # O coeficiente angular representa quanto o saldo tende a variar,
+            # em reais, a cada mês do período analisado.
+            df_tendencia = (
+                df_evolucao.loc[
+                    ~df_evolucao["parcial"],
+                    ["mes_label", "saldo_val"],
+                ]
+                .dropna()
+                .reset_index(drop=True)
+            )
+
+            inclinacao_tendencia = None
+
+            if len(df_tendencia) >= 2:
+                eixo_tempo = np.arange(len(df_tendencia), dtype=float)
+
+                inclinacao_tendencia, intercepto_tendencia = np.polyfit(
+                    eixo_tempo,
+                    df_tendencia["saldo_val"].to_numpy(dtype=float),
+                    1,
+                )
+
+                df_tendencia["tendencia_saldo"] = (
+                    inclinacao_tendencia * eixo_tempo
+                    + intercepto_tendencia
+                )
+
+            entrada_media = float(df_evolucao["entradas_val"].mean())
+            saldo_inicial = float(df_evolucao.iloc[0]["saldo_val"])
+            saldo_final = float(df_evolucao.iloc[-1]["saldo_val"])
+            variacao_saldo = saldo_final - saldo_inicial
+
+            # A última linha representa o mês mais recente efetivamente
+            # exibido no período, seja ele fechado ou parcial.
+            ultimo_registro = df_evolucao.iloc[-1]
+
+            ultimo_mes_ref = str(ultimo_registro["mes_ref"])
+            ultimo_mes_label = (
+                f"{ultimo_mes_ref[5:7]}/{ultimo_mes_ref[0:4]}"
+            )
+
+            ultimo_mes_situacao = (
+                "parcial"
+                if bool(ultimo_registro["parcial"])
+                else "fechado"
+            )
+
+            entrada_ultimo_mes = float(
+                ultimo_registro["entradas_val"]
+            )
+
+            giro_ultimo_mes = ultimo_registro["giro"]
+
+            meses_meta = int(
+                (
+                    df_evolucao["giro"].notna()
+                    & (df_evolucao["giro"] >= float(meta_giro))
+                ).sum()
+            )
+
+            total_meses_com_giro = int(
+                df_evolucao["giro"].notna().sum()
+            )
+
+            # A primeira linha responde imediatamente: como terminou o mês
+            # mais recente mostrado no painel?
+            st.markdown(
+                f"#### Último mês do período — "
+                f"{ultimo_mes_label} ({ultimo_mes_situacao})"
+            )
+
+            atual1, atual2, atual3 = st.columns(3)
+
+            atual1.metric(
+                "Entrada do mês",
+                f"R$ {_fmt_ptbr_num(entrada_ultimo_mes, 2)}",
+            )
+
+            # Como aumento de estoque é desfavorável, delta_color="inverse"
+            # mostra redução em verde e aumento em vermelho.
+            atual2.metric(
+                "Saldo do mês",
+                f"R$ {_fmt_ptbr_num(saldo_final, 2)}",
+                delta=(
+                    "Variação no período: "
+                    f"R$ {_fmt_ptbr_num(variacao_saldo, 2)}"
+                ),
+                delta_color="inverse",
+            )
+
+            atual3.metric(
+                "Giro do mês",
+                (
+                    f"{float(giro_ultimo_mes):.2f}".replace(".", ",")
+                    if not pd.isna(giro_ultimo_mes)
+                    else "Não calculado"
+                ),
+            )
+
+            # A segunda linha resume o comportamento de todo o intervalo.
+            st.markdown("#### Resumo do período")
+
+            resumo1, resumo2, resumo3, resumo4 = st.columns(4)
+
+            resumo1.metric(
+                "Entrada média mensal",
+                f"R$ {_fmt_ptbr_num(entrada_media, 2)}",
+            )
+
+            resumo2.metric(
+                "Saldo inicial",
+                f"R$ {_fmt_ptbr_num(saldo_inicial, 2)}",
+            )
+
+            resumo3.metric(
+                "Tendência do saldo",
+                (
+                    f"R$ {_fmt_ptbr_num(inclinacao_tendencia, 2)}/mês"
+                    if inclinacao_tendencia is not None
+                    else "Dados insuficientes"
+                ),
+            )
+
+            resumo4.metric(
+                f"Meses com giro ≥ {float(meta_giro):.2f}",
+                f"{meses_meta} de {total_meses_com_giro}",
+            )
+
+            if inclinacao_tendencia is None:
+                st.info(
+                    "São necessários pelo menos dois meses fechados "
+                    "para calcular a tendência linear do saldo."
+                )
+            elif inclinacao_tendencia < 0:
+                st.success(
+                    "A tendência linear indica redução média do saldo "
+                    f"de R$ {_fmt_ptbr_num(abs(inclinacao_tendencia), 2)} "
+                    "por mês no período."
+                )
+            elif inclinacao_tendencia > 0:
+                st.warning(
+                    "A tendência linear indica aumento médio do saldo "
+                    f"de R$ {_fmt_ptbr_num(inclinacao_tendencia, 2)} "
+                    "por mês no período."
+                )
+            else:
+                st.info(
+                    "A tendência linear indica estabilidade do saldo "
+                    "no período."
+                )
+
+            # make_subplots permite combinar grandezas de escalas diferentes:
+            # valores financeiros usam o eixo esquerdo e o giro usa o direito.
+            figura = make_subplots(
+                specs=[[{"secondary_y": True}]]
+            )
+
+            entradas_formatadas = df_evolucao["entradas_val"].map(
+                lambda valor: f"R$ {_fmt_ptbr_num(valor, 2)}"
+            )
+
+            # Valor arredondado para exibição vertical dentro das barras.
+            entradas_rotulos = df_evolucao["entradas_val"].map(
+                lambda valor: f"R$ {_fmt_ptbr_num(valor, 0)}"
+            )
+
+            saldos_formatados = df_evolucao["saldo_val"].map(
+                lambda valor: f"R$ {_fmt_ptbr_num(valor, 2)}"
+            )
+
+            giros_formatados = df_evolucao["giro"].map(
+                lambda valor: (
+                    ""
+                    if pd.isna(valor)
+                    else f"{float(valor):.2f}".replace(".", ",")
+                )
+            )
+
+            # Barras: total de entradas financeiras de cada mês.
+            figura.add_trace(
+                go.Bar(
+                    x=df_evolucao["mes_label"],
+                    y=df_evolucao["entradas_val"],
+                    name="Entradas",
+                                        marker_color="#4C78A8",
+                    opacity=0.85,
+                    text=entradas_rotulos,
+                    texttemplate="%{text}",
+                    textposition="inside",
+                    textangle=-90,
+                    # Mantém todos os valores próximos à base das barras,
+                    # evitando que cada altura produza uma posição diferente.
+                    insidetextanchor="start",
+                    constraintext="none",
+                    textfont={
+                        "color": "yellow",
+                        "size": 14,
+                    },
+                    customdata=entradas_formatadas,
+                    hovertemplate=(
+                        "%{x}<br>"
+                        "Entradas: %{customdata}"
+                        "<extra></extra>"
+                    ),
+                ),
+                secondary_y=False,
+            )
+
+            # Linha principal: saldo do último snapshot existente em cada mês.
+            figura.add_trace(
+                go.Scatter(
+                    x=df_evolucao["mes_label"],
+                    y=df_evolucao["saldo_val"],
+                    name="Saldo",
+                    mode="lines+markers",
+                    line={
+                        "color": "#F28E2B",
+                        "width": 3,
+                    },
+                    marker={"size": 8},
+                    customdata=saldos_formatados,
+                    hovertemplate=(
+                        "%{x}<br>"
+                        "Saldo: %{customdata}"
+                        "<extra></extra>"
+                    ),
+                ),
+                secondary_y=False,
+            )
+
+            # Linha pontilhada: regressão linear do saldo dos meses fechados.
+            if (
+                inclinacao_tendencia is not None
+                and not df_tendencia.empty
+            ):
+                tendencia_formatada = df_tendencia[
+                    "tendencia_saldo"
+                ].map(
+                    lambda valor: (
+                        f"R$ {_fmt_ptbr_num(valor, 2)}"
+                    )
+                )
+
+                figura.add_trace(
+                    go.Scatter(
+                        x=df_tendencia["mes_label"],
+                        y=df_tendencia["tendencia_saldo"],
+                        name="Tendência do saldo",
+                        mode="lines",
+                        line={
+                            "color": "#6B7280",
+                            "width": 2,
+                            "dash": "dash",
+                        },
+                        customdata=tendencia_formatada,
+                        hovertemplate=(
+                            "%{x}<br>"
+                            "Tendência: %{customdata}"
+                            "<extra></extra>"
+                        ),
+                    ),
+                    secondary_y=False,
+                )
+
+            # Linha de giro: usa o eixo direito para permanecer legível ao lado
+            # dos valores financeiros, que estão na escala dos milhões.
+            figura.add_trace(
+                go.Scatter(
+                    x=df_evolucao["mes_label"],
+                    y=df_evolucao["giro"],
+                    name="Giro",
+                    mode="lines+markers",
+                    line={
+                        "color": "#59A14F",
+                        "width": 3,
+                    },
+                    marker={"size": 8},
+                    customdata=giros_formatados,
+                    hovertemplate=(
+                        "%{x}<br>"
+                        "Giro: %{customdata}"
+                        "<extra></extra>"
+                    ),
+                ),
+                secondary_y=True,
+            )
+
+            # A meta é representada no mesmo eixo do giro.
+            figura.add_trace(
+                go.Scatter(
+                    x=df_evolucao["mes_label"],
+                    y=[float(meta_giro)] * len(df_evolucao),
+                    name=f"Meta de giro ({float(meta_giro):.2f})",
+                    mode="lines",
+                    line={
+                        "color": "#E15759",
+                        "width": 2,
+                        "dash": "dot",
+                    },
+                    hovertemplate=(
+                        "%{x}<br>"
+                        f"Meta de giro: {float(meta_giro):.2f}"
+                        "<extra></extra>"
+                    ),
+                ),
+                secondary_y=True,
+            )
+
+            figura.update_layout(
+                height=600,
+                barmode="group",
+                hovermode="closest",
+                separators=",.",
+                margin={
+                    "l": 20,
+                    "r": 20,
+                    "t": 40,
+                    "b": 20,
+                },
+                legend={
+                    "orientation": "h",
+                    "yanchor": "bottom",
+                    "y": 1.02,
+                    "xanchor": "left",
+                    "x": 0,
+                },
+                xaxis_title="Mês",
+            )
+
+            figura.update_yaxes(
+                title_text="Valores (R$)",
+                rangemode="tozero",
+                secondary_y=False,
+            )
+
+            figura.update_yaxes(
+                title_text="Giro",
+                rangemode="tozero",
+                secondary_y=True,
+            )
+
+            st.plotly_chart(
+                figura,
+                width="stretch",
+                key="grafico_evolucao_mensal_mast",
+            )
+
+            if df_evolucao["parcial"].any():
+                st.caption(
+                    "* Mês atual parcial. Ele aparece no gráfico e nos cards, "
+                    "mas não participa do cálculo da tendência."
+                )
+
+            st.markdown("#### Dados mensais")
+
+            # A tabela permite auditar os valores apresentados no gráfico.
+            df_tabela = df_evolucao[
+                [
+                    "mes_ref",
+                    "snapshot_date",
+                    "entradas_val",
+                    "saldo_val",
+                    "giro",
+                    "parcial",
+                ]
+            ].copy()
+
+            df_tabela["snapshot_date"] = pd.to_datetime(
+                df_tabela["snapshot_date"],
+                errors="coerce",
+            ).dt.strftime("%d/%m/%Y")
+
+            df_tabela["parcial"] = df_tabela["parcial"].map(
+                {
+                    True: "Parcial",
+                    False: "Fechado",
+                }
+            )
+
+            df_tabela = df_tabela.rename(
+                columns={
+                    "mes_ref": "Mês",
+                    "snapshot_date": "Último snapshot",
+                    "entradas_val": "Entradas (R$)",
+                    "saldo_val": "Saldo (R$)",
+                    "giro": "Giro",
+                    "parcial": "Situação",
+                }
+            )
+
+            tabela_formatada = df_tabela.style.format(
+                {
+                    "Entradas (R$)": lambda valor: _fmt_ptbr_num(
+                        valor,
+                        2,
+                    ),
+                    "Saldo (R$)": lambda valor: _fmt_ptbr_num(
+                        valor,
+                        2,
+                    ),
+                    "Giro": lambda valor: (
+                        ""
+                        if pd.isna(valor)
+                        else f"{float(valor):.2f}".replace(".", ",")
+                    ),
+                },
+                na_rep="",
+            )
+
+            st.dataframe(
+                tabela_formatada,
+                width="stretch",
+                hide_index=True,
+            )
+
+            st.caption(
+                "Regras: Entradas = MB51 com débito/crédito S e ordem vazia; "
+                "Saldo = último snapshot MAST do mês; "
+                "Giro = Entradas ÷ Saldo."
+            )

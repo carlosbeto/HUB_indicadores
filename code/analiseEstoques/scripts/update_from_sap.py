@@ -533,6 +533,23 @@ def ensure_fact_snapshot(con: sqlite3.Connection):
         );
     """)
 
+    # ------------------------------------------------------------------
+    # Índice para a evolução mensal do estoque MAST
+    # ------------------------------------------------------------------
+    # O dashboard localiza os snapshots por data e soma o valor total.
+    # Como esse indicador utiliza somente o depósito MAST, o índice parcial
+    # guarda apenas as linhas necessárias para essa consulta.
+    #
+    # val_total também faz parte do índice para que o SQLite consiga
+    # calcular a soma consultando o próprio índice.
+    con.execute("""
+        CREATE INDEX IF NOT EXISTS idx_snapshot_evolucao_mast
+        ON fact_estoque_snapshot (
+            snapshot_date,
+            val_total
+        )
+        WHERE deposito = 'MAST';
+    """)
 
 def upsert_snapshot(con: sqlite3.Connection, df: pd.DataFrame, snapshot_date: str, source_file: str):
     """
@@ -631,19 +648,10 @@ def upsert_snapshot(con: sqlite3.Connection, df: pd.DataFrame, snapshot_date: st
 
 def ensure_fact_mb51_mov(con: sqlite3.Connection):
     """
-    Tabela fato de movimentos MB51 (entradas e saídas).
+    Garante a existência da tabela fato de movimentos MB51.
 
-    Por que é nova:
-    - A PK antiga (data_lancamento, deposito, material, ordem) perde movimentos
-      (entrada e saída podem compartilhar material+ordem no mesmo dia).
-    - Aqui usamos documento+item (quando disponível) para garantir granularidade.
-
-    Chave primária:
-      (data_lancamento, deposito, material, doc_material, item_doc_material)
-
-    Observação:
-    - Se doc_material/item_doc_material vierem vazios, ainda grava,
-      mas a granularidade fica mais fraca. Ideal: MB51 exportar esses campos.
+    A chave primária utiliza data, depósito, material, documento e item
+    para preservar movimentos diferentes realizados no mesmo dia.
     """
     con.execute("""
         CREATE TABLE IF NOT EXISTS fact_mb51_mov (
@@ -667,8 +675,39 @@ def ensure_fact_mb51_mov(con: sqlite3.Connection):
             source_file TEXT,
             load_ts TEXT,
 
-            PRIMARY KEY (data_lancamento, deposito, material, doc_material, item_doc_material)
+            PRIMARY KEY (
+                data_lancamento,
+                deposito,
+                material,
+                doc_material,
+                item_doc_material
+            )
         );
+    """)
+
+    # ------------------------------------------------------------------
+    # Índice para as entradas mensais do depósito MAST
+    # ------------------------------------------------------------------
+    # A regra corporativa considera como entrada:
+    # - depósito MAST;
+    # - débito/crédito igual a "S";
+    # - ordem vazia.
+    #
+    # O índice parcial guarda somente os movimentos que podem participar
+    # do cálculo, reduzindo seu tamanho e o tempo de leitura.
+    #
+    # tipo_movimento atende ao filtro opcional dos movimentos 343 e 344.
+    # valor_estimado é o campo somado para calcular o valor das entradas.
+    con.execute("""
+        CREATE INDEX IF NOT EXISTS idx_mb51_evolucao_mast_entrada
+        ON fact_mb51_mov (
+            data_lancamento,
+            tipo_movimento,
+            valor_estimado
+        )
+        WHERE deposito = 'MAST'
+          AND deb_cred = 'S'
+          AND TRIM(COALESCE(ordem, '')) = '';
     """)
 
 def ensure_mb51_schema(con: sqlite3.Connection):

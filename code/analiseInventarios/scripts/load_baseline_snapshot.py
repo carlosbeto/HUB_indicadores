@@ -126,6 +126,27 @@ def transform_baseline_df(df: pd.DataFrame, file_path: Path) -> pd.DataFrame:
         (df["qty_total"] > 0) | (df["value_total"] > 0)
     ].copy()
 
+    # O relatório SAP pode, excepcionalmente, trazer a mesma linha
+    # mais de uma vez. Como o baseline representa uma única fotografia
+    # por material e depósito, uma repetição integralmente idêntica não
+    # acrescenta informação e não deve impedir a continuidade do ETL.
+    #
+    # Importante: removemos SOMENTE duplicatas totalmente idênticas.
+    # Se duas linhas tiverem a mesma chave do banco, mas saldos ou outros
+    # dados diferentes, ambas permanecem aqui. Nesse caso, a restrição
+    # UNIQUE do SQLite continuará protegendo o banco contra uma decisão
+    # automática potencialmente incorreta.
+    linhas_antes = len(df)
+    df = df.drop_duplicates().copy()
+    duplicatas_identicas_removidas = linhas_antes - len(df)
+
+    if duplicatas_identicas_removidas > 0:
+        print(
+            "[WARN] baseline_items | "
+            f"duplicatas idênticas removidas={duplicatas_identicas_removidas} | "
+            f"arquivo={file_path.name}"
+        )
+
     cols = [
         "snapshot_date",
         "snapshot_month",

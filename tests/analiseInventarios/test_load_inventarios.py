@@ -29,6 +29,20 @@ find_missing_sources = LOADER["find_missing_sources"]
 build_rows = LOADER["build_rows"]
 main = LOADER["main"]
 
+# O baseline mensal possui um loader próprio. Carregamos sua função de
+# transformação separadamente para testar as regras que protegem a
+# granularidade snapshot + depósito + material antes da gravação no SQLite.
+BASELINE_LOADER_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "code"
+    / "analiseInventarios"
+    / "scripts"
+    / "load_baseline_snapshot.py"
+)
+
+BASELINE_LOADER = runpy.run_path(str(BASELINE_LOADER_PATH))
+
+transform_baseline_df = BASELINE_LOADER["transform_baseline_df"]
 
 def test_choose_latest_xlsx_usa_mtime_e_nao_nome(tmp_path):
     """
@@ -221,3 +235,107 @@ def test_build_rows_mm_mantem_metodo_inventario_nulo():
 
     assert len(rows) == 1
     assert rows[0]["count_method"] is None
+
+
+def test_baseline_remove_duplicata_integralmente_identica():
+    """
+    Uma repetição integralmente idêntica da fonte SAP não representa
+    um novo saldo e não deve derrubar o ETL por violação da chave única.
+
+    O loader deve preservar apenas uma ocorrência antes da persistência.
+    """
+
+    df = pd.DataFrame(
+        [
+            {
+                "Material": "1151665",
+                "Descrição de material": "SACO PROT PC 305X150MM",
+                "Depósito": "WEPV",
+                "Estoque de utilização livre": 100,
+                "Estoque em controle de qualidade": 0,
+                "Estoque bloqueado": 0,
+                "Valor do estoque de utilização livre": 35,
+                "Valor do estoque no controle de qualidade": 0,
+                "Valor do estoque bloqueado": 0,
+            },
+            {
+                "Material": "1151665",
+                "Descrição de material": "SACO PROT PC 305X150MM",
+                "Depósito": "WEPV",
+                "Estoque de utilização livre": 100,
+                "Estoque em controle de qualidade": 0,
+                "Estoque bloqueado": 0,
+                "Valor do estoque de utilização livre": 35,
+                "Valor do estoque no controle de qualidade": 0,
+                "Valor do estoque bloqueado": 0,
+            },
+        ]
+    )
+
+    # A data do snapshot é obtida pelo loader a partir do nome do arquivo.
+    file_path = Path("Materiais01092026.xlsx")
+
+    resultado = transform_baseline_df(df, file_path)
+
+    assert len(resultado) == 1
+    assert resultado.iloc[0]["warehouse_code"] == "WEPV"
+    assert resultado.iloc[0]["material"] == "1151665"
+    assert resultado.iloc[0]["qty_total"] == 100
+
+
+def test_baseline_nao_remove_mesma_chave_com_saldos_diferentes():
+    """
+    Registros com a mesma chave lógica, mas saldos diferentes, representam
+    uma ambiguidade real da fonte e não podem ser descartados automaticamente.
+
+    Mantê-los permite que a validação de unicidade do banco continue
+    protegendo o baseline contra consolidações ou sobrescritas indevidas.
+    """
+
+    df = pd.DataFrame(
+        [
+            {
+                "Material": "1151665",
+                "Descrição de material": "SACO PROT PC 305X150MM",
+                "Depósito": "WEPV",
+                "Estoque de utilização livre": 100,
+                "Estoque em controle de qualidade": 0,
+                "Estoque bloqueado": 0,
+                "Valor do estoque de utilização livre": 35,
+                "Valor do estoque no controle de qualidade": 0,
+                "Valor do estoque bloqueado": 0,
+            },
+            {
+                "Material": "1151665",
+                "Descrição de material": "SACO PROT PC 305X150MM",
+                "Depósito": "WEPV",
+                "Estoque de utilização livre": 120,
+                "Estoque em controle de qualidade": 0,
+                "Estoque bloqueado": 0,
+                "Valor do estoque de utilização livre": 42,
+                "Valor do estoque no controle de qualidade": 0,
+                "Valor do estoque bloqueado": 0,
+            },
+        ]
+    )
+
+    file_path = Path("Materiais01092026.xlsx")
+
+    resultado = transform_baseline_df(df, file_path)
+
+    # As duas linhas devem permanecer. O loader não pode escolher,
+    # somar ou sobrescrever silenciosamente uma delas.
+    assert len(resultado) == 2
+
+    assert resultado["qty_total"].tolist() == [100, 120]
+
+    # Ambas continuam representando a mesma chave lógica do banco,
+    # evidenciando que existe uma inconsistência que requer tratamento.
+    assert (
+        resultado[
+            ["snapshot_date", "warehouse_code", "material"]
+        ]
+        .drop_duplicates()
+        .shape[0]
+        == 1
+    )

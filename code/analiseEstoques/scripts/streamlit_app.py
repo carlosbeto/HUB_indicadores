@@ -2921,7 +2921,18 @@ def run():
             entrada_media = float(df_evolucao["entradas_val"].mean())
             saldo_inicial = float(df_evolucao.iloc[0]["saldo_val"])
             saldo_final = float(df_evolucao.iloc[-1]["saldo_val"])
+
+            # A variação compara diretamente o primeiro e o último saldo
+            # exibidos. Valor negativo significa redução; positivo, aumento.
             variacao_saldo = saldo_final - saldo_inicial
+
+            # O percentual usa o saldo inicial como base. O valor absoluto
+            # facilita a leitura, enquanto o sentido é informado pelo título.
+            variacao_saldo_percentual = (
+                abs(variacao_saldo) / abs(saldo_inicial) * 100
+                if saldo_inicial != 0
+                else None
+            )
 
             # A última linha representa o mês mais recente efetivamente
             # exibido no período, seja ele fechado ou parcial.
@@ -2969,16 +2980,11 @@ def run():
                 f"R$ {_fmt_ptbr_num(entrada_ultimo_mes, 2)}",
             )
 
-            # Como aumento de estoque é desfavorável, delta_color="inverse"
-            # mostra redução em verde e aumento em vermelho.
+            # Este card mostra somente o saldo do último mês. A comparação
+            # completa do período aparece separadamente no resumo.
             atual2.metric(
                 "Saldo do mês",
                 f"R$ {_fmt_ptbr_num(saldo_final, 2)}",
-                delta=(
-                    "Variação no período: "
-                    f"R$ {_fmt_ptbr_num(variacao_saldo, 2)}"
-                ),
-                delta_color="inverse",
             )
 
             atual3.metric(
@@ -3005,42 +3011,70 @@ def run():
                 f"R$ {_fmt_ptbr_num(saldo_inicial, 2)}",
             )
 
+            # A comparação direta entre o primeiro e o último saldo é mais
+            # simples de conferir do que o coeficiente da regressão linear.
+            # A regressão continua sendo utilizada somente para desenhar a
+            # linha tracejada de tendência no gráfico.
+            if variacao_saldo < 0:
+                titulo_movimento_saldo = "Redução do saldo no período"
+                mensagem_movimento_saldo = (
+                    "O saldo foi reduzido em "
+                    f"R$ {_fmt_ptbr_num(abs(variacao_saldo), 2)}"
+                )
+            elif variacao_saldo > 0:
+                titulo_movimento_saldo = "Aumento do saldo no período"
+                mensagem_movimento_saldo = (
+                    "O saldo aumentou "
+                    f"R$ {_fmt_ptbr_num(abs(variacao_saldo), 2)}"
+                )
+            else:
+                titulo_movimento_saldo = "Variação do saldo no período"
+                mensagem_movimento_saldo = (
+                    "O saldo permaneceu estável no período"
+                )
+
             resumo3.metric(
-                "Tendência do saldo",
-                (
-                    f"R$ {_fmt_ptbr_num(inclinacao_tendencia, 2)}/mês"
-                    if inclinacao_tendencia is not None
-                    else "Dados insuficientes"
-                ),
+                titulo_movimento_saldo,
+                f"R$ {_fmt_ptbr_num(abs(variacao_saldo), 2)}",
             )
+
+            if variacao_saldo_percentual is not None:
+                resumo3.caption(
+                    f"{_fmt_ptbr_num(variacao_saldo_percentual, 1)}% "
+                    "em relação ao saldo inicial"
+                )
 
             resumo4.metric(
                 f"Meses com giro ≥ {float(meta_giro):.2f}",
                 f"{meses_meta} de {total_meses_com_giro}",
             )
 
-            if inclinacao_tendencia is None:
-                st.info(
-                    "São necessários pelo menos dois meses fechados "
-                    "para calcular a tendência linear do saldo."
+            # A faixa comunica a mudança real entre o primeiro e o último
+            # saldo. Verde representa redução; amarelo representa aumento.
+            if variacao_saldo < 0:
+                complemento_percentual = (
+                    f" ({_fmt_ptbr_num(variacao_saldo_percentual, 1)}%)"
+                    if variacao_saldo_percentual is not None
+                    else ""
                 )
-            elif inclinacao_tendencia < 0:
                 st.success(
-                    "A tendência linear indica redução média do saldo "
-                    f"de R$ {_fmt_ptbr_num(abs(inclinacao_tendencia), 2)} "
-                    "por mês no período."
+                    mensagem_movimento_saldo
+                    + complemento_percentual
+                    + " no período selecionado."
                 )
-            elif inclinacao_tendencia > 0:
+            elif variacao_saldo > 0:
+                complemento_percentual = (
+                    f" ({_fmt_ptbr_num(variacao_saldo_percentual, 1)}%)"
+                    if variacao_saldo_percentual is not None
+                    else ""
+                )
                 st.warning(
-                    "A tendência linear indica aumento médio do saldo "
-                    f"de R$ {_fmt_ptbr_num(inclinacao_tendencia, 2)} "
-                    "por mês no período."
+                    mensagem_movimento_saldo
+                    + complemento_percentual
+                    + " no período selecionado."
                 )
             else:
-                st.info(
-                    "A tendência linear indica estabilidade do saldo "
-                    "no período."
-                )
+                st.info(mensagem_movimento_saldo + ".")
 
             # make_subplots permite combinar grandezas de escalas diferentes:
             # valores financeiros usam o eixo esquerdo e o giro usa o direito.

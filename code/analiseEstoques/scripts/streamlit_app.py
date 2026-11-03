@@ -1267,15 +1267,27 @@ def load_ataque_quadrantes_mes(db_path_str: str, mes_ref: str, p: float = 0.70) 
 
 @_cache_data(ttl=120)
 def list_meses_disponiveis(db_path_str: str) -> list[str]:
+    """
+    Retorna os meses disponíveis para análise do depósito MAST.
+
+    A ordenação decrescente mantém o mês mais recente no início da lista,
+    evitando que o usuário precise percorrer todos os meses anteriores no
+    campo de seleção do Streamlit.
+    """
     db_path = Path(db_path_str)
+
     with connect_readonly(db_path) as con:
-        rows = con.execute("""
-            SELECT DISTINCT mes_ref
+        rows = con.execute(
+            """
+            SELECT DISTINCT
+                mes_ref
             FROM baseline_mensal
-            WHERE deposito='MAST'
-            ORDER BY mes_ref;
-        """).fetchall()
-    return [r[0] for r in rows]
+            WHERE deposito = 'MAST'
+            ORDER BY mes_ref DESC;
+            """
+        ).fetchall()
+
+    return [row[0] for row in rows]
 
 
 @_cache_data(ttl=120)
@@ -1503,7 +1515,10 @@ def run():
     mes_ref = st.sidebar.selectbox(
         "Mês de referência",
         options=meses,
-        index=len(meses) - 1,
+
+        # A lista já vem ordenada do mês mais recente para o mais antigo.
+        # Portanto, a primeira posição é a referência padrão da tela.
+        index=0,
     )
 
     # ----------------------------

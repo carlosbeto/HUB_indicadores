@@ -1822,30 +1822,62 @@ def load_inatividade_mast(
         -- 9) Resultado detalhado utilizado pela interface.
         -- ------------------------------------------------------------
         SELECT
-            data_referencia,
-            data_saldo,
-            material,
-            descricao,
-            ROUND(quantidade_atual, 3) AS quantidade_atual,
-            ROUND(valor_atual, 2) AS valor_atual,
-            primeira_data_com_saldo,
-            ultima_entrada,
-            dias_sem_entrada,
-            ultima_saida,
-            dias_sem_saida,
-            ultima_movimentacao,
-            dias_sem_movimentacao,
-            registros_entrada,
-            registros_saida,
-            faixa_sem_saida,
-            situacao_operacional,
-            prioridade
-        FROM classificacao
+            c.data_referencia,
+            c.data_saldo,
+            c.material,
+            c.descricao,
+
+            COALESCE(
+                NULLIF(TRIM(d.bu), ''),
+                'SEM CLASSIFICAÇÃO'
+            ) AS bu,
+
+            COALESCE(
+                NULLIF(TRIM(d.diretoria), ''),
+                'SEM CLASSIFICAÇÃO'
+            ) AS diretoria,
+
+            COALESCE(
+                NULLIF(TRIM(d.segmento), ''),
+                'SEM CLASSIFICAÇÃO'
+            ) AS segmento,
+
+            ROUND(
+                c.quantidade_atual,
+                3
+            ) AS quantidade_atual,
+
+            ROUND(
+                c.valor_atual,
+                2
+            ) AS valor_atual,
+
+            c.primeira_data_com_saldo,
+            c.ultima_entrada,
+            c.dias_sem_entrada,
+            c.ultima_saida,
+            c.dias_sem_saida,
+            c.ultima_movimentacao,
+            c.dias_sem_movimentacao,
+            c.registros_entrada,
+            c.registros_saida,
+            c.faixa_sem_saida,
+            c.situacao_operacional,
+            c.prioridade
+
+        FROM classificacao AS c
+
+        -- A hierarquia é associada somente após a consolidação de cada
+        -- material. Como dim_material possui uma linha por material,
+        -- essa junção não multiplica quantidade nem valor.
+        LEFT JOIN dim_material AS d
+            ON d.material = c.material
+
         ORDER BY
-            prioridade,
-            valor_atual DESC,
-            dias_sem_saida DESC,
-            material;
+            c.prioridade,
+            c.valor_atual DESC,
+            c.dias_sem_saida DESC,
+            c.material;
     """
 
     with connect_readonly(db_path) as con:
@@ -1855,6 +1887,59 @@ def load_inatividade_mast(
         )
 
     return df.reset_index(drop=True)
+
+def filtrar_hierarquia_inatividade_mast(
+    df_inatividade: pd.DataFrame,
+    filtro_bu: str = "Todas",
+    filtro_diretoria: str = "Todas",
+    filtro_segmento: str = "Todos",
+) -> pd.DataFrame:
+    """
+    Aplica o recorte hierárquico da análise de inatividade.
+
+    Os filtros são encadeados na interface, mas esta função não depende
+    do Streamlit. Assim, a mesma regra pode ser validada por testes.
+
+    Os valores "Todas" e "Todos" representam ausência de restrição.
+    """
+
+    resultado = df_inatividade.copy()
+
+    filtros = [
+        (
+            "bu",
+            filtro_bu,
+        ),
+        (
+            "diretoria",
+            filtro_diretoria,
+        ),
+        (
+            "segmento",
+            filtro_segmento,
+        ),
+    ]
+
+    valores_sem_restricao = {
+        "",
+        "Todas",
+        "Todos",
+    }
+
+    for coluna, valor_selecionado in filtros:
+        valor_normalizado = str(
+            valor_selecionado or ""
+        ).strip()
+
+        if valor_normalizado in valores_sem_restricao:
+            continue
+
+        resultado = resultado[
+            resultado[coluna].fillna("").astype(str)
+            == valor_normalizado
+        ].copy()
+
+    return resultado.reset_index(drop=True)
 
 # =============================================================================
 # APP (tudo que usa st.* fica aqui dentro)
@@ -1983,6 +2068,9 @@ def build_excel_inatividade_mast(
         [
             "material",
             "descricao",
+            "bu",
+            "diretoria",
+            "segmento",
             "quantidade_atual",
             "valor_atual",
             "primeira_data_com_saldo",
@@ -2015,15 +2103,22 @@ def build_excel_inatividade_mast(
         columns={
             "material": "Material",
             "descricao": "Descrição",
+            "bu": "BU",
+            "diretoria": "Diretoria",
+            "segmento": "Segmento",
             "quantidade_atual": "Quantidade atual",
             "valor_atual": "Valor atual (R$)",
-            "primeira_data_com_saldo": "Primeira presença com saldo",
+            "primeira_data_com_saldo": (
+                "Primeira presença com saldo"
+            ),
             "ultima_entrada": "Última entrada",
             "dias_sem_entrada": "Dias sem entrada",
             "ultima_saida": "Última saída",
             "dias_sem_saida": "Dias sem saída",
             "ultima_movimentacao": "Último movimento",
-            "dias_sem_movimentacao": "Dias sem movimentação",
+            "dias_sem_movimentacao": (
+                "Dias sem movimentação"
+            ),
             "registros_entrada": "Registros de entrada",
             "registros_saida": "Registros de saída",
             "faixa_sem_saida": "Faixa sem saída",
@@ -2039,12 +2134,10 @@ def build_excel_inatividade_mast(
         df_inatividade.iloc[0]["data_saldo"]
     )
 
-        # Registra no próprio Excel todas as regras temporais utilizadas
-    # para que o resultado possa ser interpretado e auditado sem depender
-    # da interface do HUB.
     # Registra no próprio Excel todas as regras temporais utilizadas
     # para que o resultado possa ser interpretado e auditado sem depender
     # da interface do HUB.
+
     parametros = pd.DataFrame(
         [
             {
@@ -2144,37 +2237,71 @@ def build_excel_inatividade_mast(
         worksheet.freeze_panes = "A2"
         worksheet.auto_filter.ref = worksheet.dimensions
 
+        # ------------------------------------------------------------
+        # Formatação da aba INATIVIDADE
+        # ------------------------------------------------------------
+        # As posições abaixo acompanham a ordem atual das colunas:
+        #
+        # A  Material
+        # B  Descrição
+        # C  BU
+        # D  Diretoria
+        # E  Segmento
+        # F  Quantidade atual
+        # G  Valor atual
+        # H  Primeira presença com saldo
+        # I  Última entrada
+        # J  Dias sem entrada
+        # K  Última saída
+        # L  Dias sem saída
+        # M  Último movimento
+        # N  Dias sem movimentação
+        # O  Registros de entrada
+        # P  Registros de saída
+        # Q  Faixa sem saída
+        # R  Situação operacional
+
         # Larguras definidas para melhorar a leitura inicial do arquivo.
         larguras = {
             "A": 16,
             "B": 48,
-            "C": 18,
-            "D": 18,
-            "E": 24,
+            "C": 28,
+            "D": 22,
+            "E": 32,
             "F": 18,
             "G": 18,
-            "H": 18,
+            "H": 24,
             "I": 18,
             "J": 18,
-            "K": 24,
-            "L": 20,
+            "K": 18,
+            "L": 18,
             "M": 18,
-            "N": 28,
-            "O": 44,
+            "N": 24,
+            "O": 22,
+            "P": 20,
+            "Q": 28,
+            "R": 44,
         }
 
         for coluna, largura in larguras.items():
             worksheet.column_dimensions[coluna].width = largura
 
-        # Formatação numérica e monetária.
-        for celula in worksheet["C"][1:]:
-            celula.number_format = "#,##0.000"
+        # A quantidade atual do estoque MAST é apresentada como número
+        # inteiro, pois não existem saldos fracionados neste depósito.
+        for celula in worksheet["F"][1:]:
+            celula.number_format = "#,##0"
 
-        for celula in worksheet["D"][1:]:
+        # O valor atual recebe formatação monetária.
+        for celula in worksheet["G"][1:]:
             celula.number_format = 'R$ #,##0.00'
 
-        # Formatação das colunas de data.
-        for coluna_data in ["E", "F", "H", "J"]:
+        # Indicadores de quantidade de dias e registros são inteiros.
+        for coluna_inteira in ["J", "L", "N", "O", "P"]:
+            for celula in worksheet[coluna_inteira][1:]:
+                celula.number_format = "#,##0"
+
+        # Datas reais do Excel recebem apresentação no padrão brasileiro.
+        for coluna_data in ["H", "I", "K", "M"]:
             for celula in worksheet[coluna_data][1:]:
                 celula.number_format = "dd/mm/yyyy"
 
@@ -4175,6 +4302,142 @@ def run():
                 f"Saldo utilizado: {data_saldo_texto}"
             )
 
+                        # --------------------------------------------------------
+            # Filtros organizacionais
+            # --------------------------------------------------------
+            # BU, Diretoria e Segmento definem o escopo de toda a página.
+            # Por isso, o recorte é aplicado antes dos cards, do gráfico,
+            # dos filtros operacionais, da tabela e da exportação.
+            st.markdown("#### Recorte organizacional")
+
+            filtro_bu_col, filtro_diretoria_col, filtro_segmento_col = (
+                st.columns(3)
+            )
+
+            opcoes_bu = [
+                "Todas",
+                *sorted(
+                    df_inatividade["bu"]
+                    .dropna()
+                    .astype(str)
+                    .str.strip()
+                    .loc[lambda valores: valores != ""]
+                    .unique()
+                    .tolist()
+                ),
+            ]
+
+            chave_filtro_bu = "filtro_bu_inatividade_mast"
+
+            if (
+                chave_filtro_bu in st.session_state
+                and st.session_state[chave_filtro_bu] not in opcoes_bu
+            ):
+                st.session_state[chave_filtro_bu] = "Todas"
+
+            with filtro_bu_col:
+                filtro_bu = st.selectbox(
+                    "BU",
+                    options=opcoes_bu,
+                    index=0,
+                    key=chave_filtro_bu,
+                )
+
+            # As opções de Diretoria dependem da BU selecionada.
+            df_opcoes_diretoria = filtrar_hierarquia_inatividade_mast(
+                df_inatividade=df_inatividade,
+                filtro_bu=filtro_bu,
+                filtro_diretoria="Todas",
+                filtro_segmento="Todos",
+            )
+
+            opcoes_diretoria = [
+                "Todas",
+                *sorted(
+                    df_opcoes_diretoria["diretoria"]
+                    .dropna()
+                    .astype(str)
+                    .str.strip()
+                    .loc[lambda valores: valores != ""]
+                    .unique()
+                    .tolist()
+                ),
+            ]
+
+            chave_filtro_diretoria = (
+                "filtro_diretoria_inatividade_mast"
+            )
+
+            if (
+                chave_filtro_diretoria in st.session_state
+                and st.session_state[chave_filtro_diretoria]
+                not in opcoes_diretoria
+            ):
+                st.session_state[chave_filtro_diretoria] = "Todas"
+
+            with filtro_diretoria_col:
+                filtro_diretoria = st.selectbox(
+                    "Diretoria",
+                    options=opcoes_diretoria,
+                    index=0,
+                    key=chave_filtro_diretoria,
+                )
+
+            # As opções de Segmento dependem da BU e da Diretoria.
+            df_opcoes_segmento = filtrar_hierarquia_inatividade_mast(
+                df_inatividade=df_inatividade,
+                filtro_bu=filtro_bu,
+                filtro_diretoria=filtro_diretoria,
+                filtro_segmento="Todos",
+            )
+
+            opcoes_segmento = [
+                "Todos",
+                *sorted(
+                    df_opcoes_segmento["segmento"]
+                    .dropna()
+                    .astype(str)
+                    .str.strip()
+                    .loc[lambda valores: valores != ""]
+                    .unique()
+                    .tolist()
+                ),
+            ]
+
+            chave_filtro_segmento = (
+                "filtro_segmento_inatividade_mast"
+            )
+
+            if (
+                chave_filtro_segmento in st.session_state
+                and st.session_state[chave_filtro_segmento]
+                not in opcoes_segmento
+            ):
+                st.session_state[chave_filtro_segmento] = "Todos"
+
+            with filtro_segmento_col:
+                filtro_segmento = st.selectbox(
+                    "Segmento",
+                    options=opcoes_segmento,
+                    index=0,
+                    key=chave_filtro_segmento,
+                )
+
+            # A partir deste ponto, toda a visão utiliza somente o recorte
+            # organizacional selecionado.
+            df_inatividade = filtrar_hierarquia_inatividade_mast(
+                df_inatividade=df_inatividade,
+                filtro_bu=filtro_bu,
+                filtro_diretoria=filtro_diretoria,
+                filtro_segmento=filtro_segmento,
+            )
+
+            st.caption(
+                f"Escopo selecionado: BU = {filtro_bu} | "
+                f"Diretoria = {filtro_diretoria} | "
+                f"Segmento = {filtro_segmento}"
+            )
+
             # --------------------------------------------------------
             # Indicadores executivos
             # --------------------------------------------------------
@@ -4489,9 +4752,6 @@ def run():
             )
 
             # --------------------------------------------------------
-            # Aplicação dos filtros
-            # --------------------------------------------------------
-                        # --------------------------------------------------------
             # Aplicação centralizada dos filtros
             # --------------------------------------------------------
             # A regra fica em uma função independente do Streamlit para
@@ -4545,6 +4805,9 @@ def run():
                     [
                         "material",
                         "descricao",
+                        "bu",
+                        "diretoria",
+                        "segmento",
                         "quantidade_atual",
                         "valor_atual",
                         "ultima_entrada",
@@ -4573,6 +4836,9 @@ def run():
                         columns={
                             "material": "Material",
                             "descricao": "Descrição",
+                            "bu": "BU",
+                            "diretoria": "Diretoria",
+                            "segmento": "Segmento",
                             "quantidade_atual": "Quantidade atual",
                             "valor_atual": "Valor atual (R$)",
                             "ultima_entrada": "Última entrada",

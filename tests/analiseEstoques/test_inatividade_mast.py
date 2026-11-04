@@ -6,9 +6,11 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
+from openpyxl import load_workbook
 
 from analiseEstoques.scripts.streamlit_app import (
     build_excel_inatividade_mast,
+    filtrar_hierarquia_inatividade_mast,
     filtrar_inatividade_mast,
     load_inatividade_mast,
 )
@@ -52,6 +54,15 @@ def _criar_banco_inatividade(caminho: Path) -> None:
                 deb_cred TEXT,
                 ordem TEXT,
                 tipo_movimento TEXT
+            );
+
+            -- Dimensão comercial mínima utilizada pela consulta de
+            -- inatividade para associar BU, Diretoria e Segmento.
+            CREATE TABLE dim_material (
+                material TEXT PRIMARY KEY,
+                bu TEXT,
+                diretoria TEXT,
+                segmento TEXT
             );
             """
         )
@@ -325,6 +336,95 @@ def test_inatividade_classifica_materiais_criticos(
         1700.0
     )
 
+def test_inatividade_associa_hierarquia_sem_perder_materiais(
+    tmp_path: Path,
+) -> None:
+    """
+    A hierarquia comercial deve ser associada sem multiplicar o resultado.
+
+    Materiais sem cadastro em dim_material continuam visíveis e recebem
+    "SEM CLASSIFICAÇÃO" nos três níveis hierárquicos.
+    """
+
+    banco = tmp_path / "estoque_inatividade_hierarquia.sqlite"
+    _criar_banco_inatividade(banco)
+
+    with sqlite3.connect(banco) as connection:
+        connection.execute(
+            """
+            INSERT INTO dim_material (
+                material,
+                bu,
+                diretoria,
+                segmento
+            )
+            VALUES (?, ?, ?, ?);
+            """,
+            (
+                "RECENTE",
+                "BU TESTE",
+                "DIRETORIA TESTE",
+                "SEGMENTO TESTE",
+            ),
+        )
+
+    resultado = load_inatividade_mast(
+        str(banco),
+    )
+
+    # A junção com a dimensão não pode criar ou remover materiais.
+    assert resultado["material"].tolist() == [
+        "RECENTE",
+        "SEM-SAIDA",
+        "TECNICO-343",
+    ]
+
+    assert len(resultado) == 3
+
+    # O valor total deve permanecer idêntico ao resultado sem hierarquia.
+    assert resultado["valor_atual"].sum() == pytest.approx(
+        1700.0
+    )
+
+    por_material = resultado.set_index("material")
+
+    assert por_material.loc["RECENTE", "bu"] == "BU TESTE"
+    assert (
+        por_material.loc["RECENTE", "diretoria"]
+        == "DIRETORIA TESTE"
+    )
+    assert (
+        por_material.loc["RECENTE", "segmento"]
+        == "SEGMENTO TESTE"
+    )
+
+    for material_sem_classificacao in [
+        "SEM-SAIDA",
+        "TECNICO-343",
+    ]:
+        assert (
+            por_material.loc[
+                material_sem_classificacao,
+                "bu",
+            ]
+            == "SEM CLASSIFICAÇÃO"
+        )
+
+        assert (
+            por_material.loc[
+                material_sem_classificacao,
+                "diretoria",
+            ]
+            == "SEM CLASSIFICAÇÃO"
+        )
+
+        assert (
+            por_material.loc[
+                material_sem_classificacao,
+                "segmento",
+            ]
+            == "SEM CLASSIFICAÇÃO"
+        )
 
 def test_inatividade_reconhece_todo_h_e_ignora_343_344(
     tmp_path: Path,
@@ -515,6 +615,38 @@ def test_excel_inatividade_documenta_janelas_temporais(
     assert isinstance(conteudo_excel, bytes)
     assert conteudo_excel
 
+        # ------------------------------------------------------------
+    # Valida a estrutura e a formatação da aba de detalhes.
+    # ------------------------------------------------------------
+    # Esta verificação protege contra deslocamentos das formatações
+    # quando novas colunas são incluídas antes dos dados operacionais.
+    workbook = load_workbook(
+        BytesIO(conteudo_excel),
+        data_only=False,
+    )
+
+    worksheet = workbook["INATIVIDADE"]
+
+    assert worksheet.max_column == 18
+
+    # Quantidade e valor.
+    assert worksheet["F2"].number_format == "#,##0"
+    assert worksheet["G2"].number_format == "R$ #,##0.00"
+
+    # Datas.
+    for coluna_data in ["H", "I", "K", "M"]:
+        assert (
+            worksheet[f"{coluna_data}2"].number_format
+            == "dd/mm/yyyy"
+        )
+
+    # Dias e quantidades de registros.
+    for coluna_inteira in ["J", "L", "N", "O", "P"]:
+        assert (
+            worksheet[f"{coluna_inteira}2"].number_format
+            == "#,##0"
+        )
+
     with pd.ExcelFile(BytesIO(conteudo_excel)) as arquivo_excel:
         assert arquivo_excel.sheet_names == [
             "INATIVIDADE",
@@ -534,6 +666,29 @@ def test_excel_inatividade_documenta_janelas_temporais(
     # O Excel contém todos os materiais do recorte. O Top 20 e o Top 50
     # pertencem somente à apresentação visual do Streamlit.
     assert len(detalhe) == len(resultado)
+
+        # A aba detalhada deve identificar a hierarquia comercial do material.
+    assert detalhe.columns[:5].tolist() == [
+        "Material",
+        "Descrição",
+        "BU",
+        "Diretoria",
+        "Segmento",
+    ]
+
+    # O banco sintético não possui classificação para esses materiais.
+    # Mesmo assim, eles devem permanecer no Excel de forma auditável.
+    assert set(detalhe["BU"]) == {
+        "SEM CLASSIFICAÇÃO",
+    }
+
+    assert set(detalhe["Diretoria"]) == {
+        "SEM CLASSIFICAÇÃO",
+    }
+
+    assert set(detalhe["Segmento"]) == {
+        "SEM CLASSIFICAÇÃO",
+    }
 
     parametros = dict(
         zip(
@@ -628,3 +783,80 @@ def test_filtro_inatividade_sem_situacao_representa_todas() -> None:
     assert resultado_pesquisa.iloc[0]["situacao_operacional"] == (
         "SEM SAÍDA E SEM MOVIMENTAÇÃO RECENTE"
     )
+
+def test_filtro_hierarquico_inatividade_respeita_encadeamento() -> None:
+    """
+    BU, Diretoria e Segmento devem restringir progressivamente o recorte.
+
+    A ausência de seleção preserva todos os materiais.
+    """
+
+    dados = pd.DataFrame(
+        [
+            {
+                "material": "ITEM-1",
+                "bu": "BU A",
+                "diretoria": "DIRETORIA 1",
+                "segmento": "SEGMENTO X",
+            },
+            {
+                "material": "ITEM-2",
+                "bu": "BU A",
+                "diretoria": "DIRETORIA 2",
+                "segmento": "SEGMENTO Y",
+            },
+            {
+                "material": "ITEM-3",
+                "bu": "BU B",
+                "diretoria": "DIRETORIA 3",
+                "segmento": "SEGMENTO Z",
+            },
+        ]
+    )
+
+    resultado_completo = filtrar_hierarquia_inatividade_mast(
+        df_inatividade=dados,
+        filtro_bu="Todas",
+        filtro_diretoria="Todas",
+        filtro_segmento="Todos",
+    )
+
+    assert resultado_completo["material"].tolist() == [
+        "ITEM-1",
+        "ITEM-2",
+        "ITEM-3",
+    ]
+
+    resultado_bu = filtrar_hierarquia_inatividade_mast(
+        df_inatividade=dados,
+        filtro_bu="BU A",
+        filtro_diretoria="Todas",
+        filtro_segmento="Todos",
+    )
+
+    assert resultado_bu["material"].tolist() == [
+        "ITEM-1",
+        "ITEM-2",
+    ]
+
+    resultado_diretoria = filtrar_hierarquia_inatividade_mast(
+        df_inatividade=dados,
+        filtro_bu="BU A",
+        filtro_diretoria="DIRETORIA 2",
+        filtro_segmento="Todos",
+    )
+
+    assert resultado_diretoria["material"].tolist() == [
+        "ITEM-2",
+    ]
+
+    resultado_segmento = filtrar_hierarquia_inatividade_mast(
+        df_inatividade=dados,
+        filtro_bu="BU A",
+        filtro_diretoria="DIRETORIA 1",
+        filtro_segmento="SEGMENTO X",
+    )
+
+    assert resultado_segmento["material"].tolist() == [
+        "ITEM-1",
+    ]

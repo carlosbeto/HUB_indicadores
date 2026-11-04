@@ -1456,9 +1456,637 @@ def load_evolucao_mensal_mast(
         columns=colunas,
     ).reset_index(drop=True)
 
+@_cache_data(ttl=120)
+def load_inatividade_mast(
+    db_path_str: str,
+) -> pd.DataFrame:
+    """
+    Carrega os materiais do MAST com inatividade crítica de saída.
+
+    Um material é considerado crítico quando:
+
+    - possui saldo atual positivo e não apresenta saída no histórico
+      disponível da MB51; ou
+    - possui saldo atual positivo e está há mais de 90 dias sem saída.
+
+    Datas utilizadas
+    ----------------
+    O saldo e as movimentações precisam representar o mesmo momento.
+
+    Por isso, a função utiliza como referência a menor data entre:
+
+    - o último snapshot disponível;
+    - a última movimentação disponível na MB51.
+
+    Caso não exista snapshot exatamente nessa data, é utilizado o último
+    snapshot anterior ou igual à data de referência.
+
+    Regras da MB51
+    ---------------
+    Entrada operacional:
+        deb_cred = 'S' e ordem vazia.
+
+    Saída operacional:
+        todo movimento com deb_cred = 'H', independentemente de a ordem
+        estar vazia ou preenchida.
+
+    Movimentos 343 e 344:
+        são sempre desconsiderados nesta análise, pois representam
+        bloqueio/desbloqueio de estoque e não devem reiniciar o tempo
+        operacional de inatividade.
+
+    Observação importante
+    ---------------------
+    "Sem saída no histórico disponível" significa que não foi localizada
+    uma saída dentro do período existente em fact_mb51_mov. Isso não
+    significa necessariamente que o material nunca teve saída antes do
+    início do histórico armazenado.
+    """
+
+    db_path = Path(db_path_str)
+
+    query = """
+        WITH
+        -- ------------------------------------------------------------
+        -- 1) Limites temporais disponíveis nas duas fontes.
+        -- ------------------------------------------------------------
+        limites AS (
+            SELECT
+                (
+                    SELECT MAX(snapshot_date)
+                    FROM fact_estoque_snapshot
+                    WHERE deposito = 'MAST'
+                ) AS ultimo_snapshot,
+
+                (
+                    SELECT MIN(data_lancamento)
+                    FROM fact_mb51_mov
+                    WHERE deposito = 'MAST'
+                ) AS inicio_mb51,
+
+                (
+                    SELECT MAX(data_lancamento)
+                    FROM fact_mb51_mov
+                    WHERE deposito = 'MAST'
+                ) AS fim_mb51
+        ),
+
+        -- ------------------------------------------------------------
+        -- 2) Data comum entre saldo e movimentações.
+        -- ------------------------------------------------------------
+        referencia AS (
+            SELECT
+                inicio_mb51,
+                fim_mb51,
+                ultimo_snapshot,
+
+                CASE
+                    WHEN ultimo_snapshot <= fim_mb51
+                        THEN ultimo_snapshot
+                    ELSE fim_mb51
+                END AS data_referencia
+            FROM limites
+        ),
+
+        -- ------------------------------------------------------------
+        -- 3) Último snapshot existente até a data de referência.
+        -- ------------------------------------------------------------
+        data_saldo AS (
+            SELECT
+                MAX(s.snapshot_date) AS snapshot_date
+            FROM fact_estoque_snapshot AS s
+            CROSS JOIN referencia AS r
+            WHERE s.deposito = 'MAST'
+              AND s.snapshot_date <= r.data_referencia
+        ),
+
+        -- ------------------------------------------------------------
+        -- 4) Saldo dos materiais na fotografia selecionada.
+        -- ------------------------------------------------------------
+        saldo_atual AS (
+            SELECT
+                s.material,
+                MAX(s.descricao) AS descricao,
+                SUM(COALESCE(s.qtd_total, 0)) AS quantidade_atual,
+                SUM(COALESCE(s.val_total, 0)) AS valor_atual
+            FROM fact_estoque_snapshot AS s
+            CROSS JOIN data_saldo AS d
+            WHERE s.deposito = 'MAST'
+              AND s.snapshot_date = d.snapshot_date
+            GROUP BY
+                s.material
+            HAVING
+                SUM(COALESCE(s.qtd_total, 0)) > 0
+                OR SUM(COALESCE(s.val_total, 0)) > 0
+        ),
+
+        -- ------------------------------------------------------------
+        -- 5) Primeira fotografia em que o material aparece com saldo.
+        --
+        -- Para materiais sem saída, essa data ajuda a determinar há
+        -- quanto tempo o material está sendo observado no estoque.
+        -- ------------------------------------------------------------
+        primeira_presenca AS (
+            SELECT
+                s.material,
+                MIN(s.snapshot_date) AS primeira_data_com_saldo
+            FROM fact_estoque_snapshot AS s
+            INNER JOIN saldo_atual AS a
+                ON a.material = s.material
+            CROSS JOIN referencia AS r
+            WHERE s.deposito = 'MAST'
+              AND s.snapshot_date <= r.data_referencia
+              AND (
+                  COALESCE(s.qtd_total, 0) > 0
+                  OR COALESCE(s.val_total, 0) > 0
+              )
+            GROUP BY
+                s.material
+        ),
+
+        -- ------------------------------------------------------------
+        -- 6) Últimas movimentações de cada material.
+        -- ------------------------------------------------------------
+        movimentacoes AS (
+            SELECT
+                m.material,
+
+                MAX(
+                    CASE
+                        WHEN m.deb_cred = 'S'
+                         AND TRIM(COALESCE(m.ordem, '')) = ''
+                            THEN m.data_lancamento
+                    END
+                ) AS ultima_entrada,
+
+                MAX(
+                    CASE
+                        WHEN m.deb_cred = 'H'
+                            THEN m.data_lancamento
+                    END
+                ) AS ultima_saida,
+
+                MAX(m.data_lancamento) AS ultima_movimentacao,
+
+                SUM(
+                    CASE
+                        WHEN m.deb_cred = 'S'
+                         AND TRIM(COALESCE(m.ordem, '')) = ''
+                            THEN 1
+                        ELSE 0
+                    END
+                ) AS registros_entrada,
+
+                SUM(
+                    CASE
+                        WHEN m.deb_cred = 'H'
+                            THEN 1
+                        ELSE 0
+                    END
+                ) AS registros_saida
+
+            FROM fact_mb51_mov AS m
+            INNER JOIN saldo_atual AS a
+                ON a.material = m.material
+            CROSS JOIN referencia AS r
+            WHERE m.deposito = 'MAST'
+              AND m.data_lancamento <= r.data_referencia
+              AND TRIM(COALESCE(m.tipo_movimento, ''))
+                  NOT IN ('343', '344')
+            GROUP BY
+                m.material
+        ),
+
+        -- ------------------------------------------------------------
+        -- 7) Indicadores temporais de cada material.
+        -- ------------------------------------------------------------
+        indicadores AS (
+            SELECT
+                a.material,
+                a.descricao,
+                a.quantidade_atual,
+                a.valor_atual,
+                p.primeira_data_com_saldo,
+                m.ultima_entrada,
+                m.ultima_saida,
+                m.ultima_movimentacao,
+
+                COALESCE(
+                    m.registros_entrada,
+                    0
+                ) AS registros_entrada,
+
+                COALESCE(
+                    m.registros_saida,
+                    0
+                ) AS registros_saida,
+
+                d.snapshot_date AS data_saldo,
+                r.data_referencia,
+
+                CASE
+                    WHEN m.ultima_entrada IS NOT NULL
+                        THEN CAST(
+                            JULIANDAY(r.data_referencia)
+                            - JULIANDAY(m.ultima_entrada)
+                            AS INTEGER
+                        )
+                END AS dias_sem_entrada,
+
+                CASE
+                    WHEN m.ultima_saida IS NOT NULL
+                        THEN CAST(
+                            JULIANDAY(r.data_referencia)
+                            - JULIANDAY(m.ultima_saida)
+                            AS INTEGER
+                        )
+                    ELSE CAST(
+                        JULIANDAY(r.data_referencia)
+                        - JULIANDAY(
+                            MAX(
+                                COALESCE(
+                                    p.primeira_data_com_saldo,
+                                    r.inicio_mb51
+                                ),
+                                r.inicio_mb51
+                            )
+                        )
+                        AS INTEGER
+                    )
+                END AS dias_sem_saida,
+
+                CASE
+                    WHEN m.ultima_movimentacao IS NOT NULL
+                        THEN CAST(
+                            JULIANDAY(r.data_referencia)
+                            - JULIANDAY(m.ultima_movimentacao)
+                            AS INTEGER
+                        )
+                    ELSE CAST(
+                        JULIANDAY(r.data_referencia)
+                        - JULIANDAY(
+                            MAX(
+                                COALESCE(
+                                    p.primeira_data_com_saldo,
+                                    r.inicio_mb51
+                                ),
+                                r.inicio_mb51
+                            )
+                        )
+                        AS INTEGER
+                    )
+                END AS dias_sem_movimentacao
+
+            FROM saldo_atual AS a
+            LEFT JOIN primeira_presenca AS p
+                ON p.material = a.material
+            LEFT JOIN movimentacoes AS m
+                ON m.material = a.material
+            CROSS JOIN referencia AS r
+            CROSS JOIN data_saldo AS d
+        ),
+
+        -- ------------------------------------------------------------
+        -- 8) Classificação operacional e prioridade da tela.
+        -- ------------------------------------------------------------
+        classificacao AS (
+            SELECT
+                *,
+
+                CASE
+                    WHEN ultima_entrada IS NOT NULL
+                     AND dias_sem_entrada <= 30
+                     AND (
+                            ultima_saida IS NULL
+                            OR dias_sem_saida > 90
+                         )
+                        THEN
+                            'ENTRADA RECENTE SEM SAÍDA RECENTE'
+
+                    WHEN ultima_saida IS NULL
+                     AND dias_sem_movimentacao > 90
+                        THEN
+                            'SEM SAÍDA E SEM MOVIMENTAÇÃO RECENTE'
+
+                    WHEN ultima_saida IS NULL
+                        THEN
+                            'SEM SAÍDA NO HISTÓRICO DISPONÍVEL'
+
+                    WHEN dias_sem_movimentacao > 90
+                        THEN
+                            'ESTOQUE COMPLETAMENTE PARADO'
+
+                    WHEN dias_sem_saida > 180
+                        THEN
+                            'MAIS DE 180 DIAS SEM SAÍDA'
+
+                    ELSE
+                        '91 A 180 DIAS SEM SAÍDA'
+                END AS situacao_operacional,
+
+                CASE
+                    WHEN ultima_saida IS NULL
+                        THEN 'SEM SAÍDA NO HISTÓRICO'
+                    WHEN dias_sem_saida > 180
+                        THEN 'MAIS DE 180 DIAS'
+                    ELSE '91 A 180 DIAS'
+                END AS faixa_sem_saida,
+
+                CASE
+                    WHEN ultima_entrada IS NOT NULL
+                     AND dias_sem_entrada <= 30
+                     AND (
+                            ultima_saida IS NULL
+                            OR dias_sem_saida > 90
+                         )
+                        THEN 1
+
+                    WHEN ultima_saida IS NULL
+                        THEN 2
+
+                    WHEN dias_sem_movimentacao > 90
+                        THEN 3
+
+                    WHEN dias_sem_saida > 180
+                        THEN 4
+
+                    ELSE 5
+                END AS prioridade
+
+            FROM indicadores
+            WHERE ultima_saida IS NULL
+               OR dias_sem_saida > 90
+        )
+
+        -- ------------------------------------------------------------
+        -- 9) Resultado detalhado utilizado pela interface.
+        -- ------------------------------------------------------------
+        SELECT
+            data_referencia,
+            data_saldo,
+            material,
+            descricao,
+            ROUND(quantidade_atual, 3) AS quantidade_atual,
+            ROUND(valor_atual, 2) AS valor_atual,
+            primeira_data_com_saldo,
+            ultima_entrada,
+            dias_sem_entrada,
+            ultima_saida,
+            dias_sem_saida,
+            ultima_movimentacao,
+            dias_sem_movimentacao,
+            registros_entrada,
+            registros_saida,
+            faixa_sem_saida,
+            situacao_operacional,
+            prioridade
+        FROM classificacao
+        ORDER BY
+            prioridade,
+            valor_atual DESC,
+            dias_sem_saida DESC,
+            material;
+    """
+
+    with connect_readonly(db_path) as con:
+        df = pd.read_sql_query(
+            query,
+            con,
+        )
+
+    return df.reset_index(drop=True)
+
 # =============================================================================
 # APP (tudo que usa st.* fica aqui dentro)
 # =============================================================================
+
+@_cache_data(ttl=120)
+def build_excel_inatividade_mast(
+    df_inatividade: pd.DataFrame,
+) -> bytes:
+    """
+    Gera o Excel da análise de inatividade do MAST.
+
+    O arquivo contém:
+
+    - INATIVIDADE: materiais do recorte filtrado;
+    - PARAMETROS: datas utilizadas e critérios da análise.
+
+    A função recebe o dataframe já filtrado pela interface. Portanto,
+    o Excel representa exatamente o recorte solicitado pelo usuário,
+    sem ficar limitado ao Top 20 ou Top 50 da visualização.
+    """
+
+    if df_inatividade.empty:
+        return b""
+
+    output = io.BytesIO()
+
+    exportacao = df_inatividade[
+        [
+            "material",
+            "descricao",
+            "quantidade_atual",
+            "valor_atual",
+            "primeira_data_com_saldo",
+            "ultima_entrada",
+            "dias_sem_entrada",
+            "ultima_saida",
+            "dias_sem_saida",
+            "ultima_movimentacao",
+            "dias_sem_movimentacao",
+            "registros_entrada",
+            "registros_saida",
+            "faixa_sem_saida",
+            "situacao_operacional",
+        ]
+    ].copy()
+
+    # Datas reais no Excel permitem ordenação e filtros cronológicos.
+    for coluna_data in [
+        "primeira_data_com_saldo",
+        "ultima_entrada",
+        "ultima_saida",
+        "ultima_movimentacao",
+    ]:
+        exportacao[coluna_data] = pd.to_datetime(
+            exportacao[coluna_data],
+            errors="coerce",
+        )
+
+    exportacao = exportacao.rename(
+        columns={
+            "material": "Material",
+            "descricao": "Descrição",
+            "quantidade_atual": "Quantidade atual",
+            "valor_atual": "Valor atual (R$)",
+            "primeira_data_com_saldo": "Primeira presença com saldo",
+            "ultima_entrada": "Última entrada",
+            "dias_sem_entrada": "Dias sem entrada",
+            "ultima_saida": "Última saída",
+            "dias_sem_saida": "Dias sem saída",
+            "ultima_movimentacao": "Último movimento",
+            "dias_sem_movimentacao": "Dias sem movimentação",
+            "registros_entrada": "Registros de entrada",
+            "registros_saida": "Registros de saída",
+            "faixa_sem_saida": "Faixa sem saída",
+            "situacao_operacional": "Situação operacional",
+        }
+    )
+
+    data_referencia = str(
+        df_inatividade.iloc[0]["data_referencia"]
+    )
+
+    data_saldo = str(
+        df_inatividade.iloc[0]["data_saldo"]
+    )
+
+        # Registra no próprio Excel todas as regras temporais utilizadas
+    # para que o resultado possa ser interpretado e auditado sem depender
+    # da interface do HUB.
+    # Registra no próprio Excel todas as regras temporais utilizadas
+    # para que o resultado possa ser interpretado e auditado sem depender
+    # da interface do HUB.
+    parametros = pd.DataFrame(
+        [
+            {
+                "Parâmetro": "Depósito",
+                "Valor": "MAST",
+            },
+            {
+                "Parâmetro": "Data de referência",
+                "Valor": data_referencia,
+            },
+            {
+                "Parâmetro": "Data do saldo",
+                "Valor": data_saldo,
+            },
+            {
+                "Parâmetro": "Janela de entrada recente",
+                "Valor": (
+                    "30 dias anteriores à data de referência, "
+                    "incluindo a própria data"
+                ),
+            },
+            {
+                "Parâmetro": "Entrada recente",
+                "Valor": (
+                    "Última entrada ocorrida há até 30 dias"
+                ),
+            },
+            {
+                "Parâmetro": "Sem saída recente",
+                "Valor": (
+                    "Última saída inexistente no histórico disponível "
+                    "ou ocorrida há mais de 90 dias"
+                ),
+            },
+            {
+                "Parâmetro": "Sem movimentação recente",
+                "Valor": (
+                    "Nenhuma entrada ou saída ocorrida nos últimos "
+                    "90 dias"
+                ),
+            },
+            {
+                "Parâmetro": "Critério crítico",
+                "Valor": (
+                    "Sem saída no histórico disponível ou "
+                    "mais de 90 dias sem saída"
+                ),
+            },
+            {
+                "Parâmetro": "Entrada operacional",
+                "Valor": "Débito/crédito S com ordem vazia",
+            },
+            {
+                "Parâmetro": "Saída operacional",
+                "Valor": "Todo débito/crédito H",
+            },
+            {
+                "Parâmetro": "Movimentos desconsiderados",
+                "Valor": "343 e 344",
+            },
+            {
+                "Parâmetro": "Materiais exportados",
+                "Valor": int(len(exportacao)),
+            },
+            {
+                "Parâmetro": "Valor total exportado",
+                "Valor": float(
+                    df_inatividade["valor_atual"].sum()
+                ),
+            },
+            {
+                "Parâmetro": "Gerado em",
+                "Valor": datetime.now().strftime(
+                    "%d/%m/%Y %H:%M:%S"
+                ),
+            },
+        ]
+    )
+
+    with pd.ExcelWriter(
+        output,
+        engine="openpyxl",
+    ) as writer:
+        exportacao.to_excel(
+            writer,
+            sheet_name="INATIVIDADE",
+            index=False,
+        )
+
+        parametros.to_excel(
+            writer,
+            sheet_name="PARAMETROS",
+            index=False,
+        )
+
+        worksheet = writer.book["INATIVIDADE"]
+        worksheet.freeze_panes = "A2"
+        worksheet.auto_filter.ref = worksheet.dimensions
+
+        # Larguras definidas para melhorar a leitura inicial do arquivo.
+        larguras = {
+            "A": 16,
+            "B": 48,
+            "C": 18,
+            "D": 18,
+            "E": 24,
+            "F": 18,
+            "G": 18,
+            "H": 18,
+            "I": 18,
+            "J": 18,
+            "K": 24,
+            "L": 20,
+            "M": 18,
+            "N": 28,
+            "O": 44,
+        }
+
+        for coluna, largura in larguras.items():
+            worksheet.column_dimensions[coluna].width = largura
+
+        # Formatação numérica e monetária.
+        for celula in worksheet["C"][1:]:
+            celula.number_format = "#,##0.000"
+
+        for celula in worksheet["D"][1:]:
+            celula.number_format = 'R$ #,##0.00'
+
+        # Formatação das colunas de data.
+        for coluna_data in ["E", "F", "H", "J"]:
+            for celula in worksheet[coluna_data][1:]:
+                celula.number_format = "dd/mm/yyyy"
+
+        parametros_ws = writer.book["PARAMETROS"]
+        parametros_ws.freeze_panes = "A2"
+        parametros_ws.column_dimensions["A"].width = 32
+        parametros_ws.column_dimensions["B"].width = 72
+
+    return output.getvalue()
 
 def run():
     # ----------------------------
@@ -1521,19 +2149,36 @@ def run():
         index=0,
     )
 
-    # ----------------------------
-    # Tabs
-    # ----------------------------
-    tab1, tab2, tab3, tab4 = st.tabs(
-        [
-            "Mensal (KPI)",
-            "Diário (séries)",
-            "Ataque (quadrantes)",
-            "Evolução mensal",
-        ]
+    # ------------------------------------------------------------
+    # Navegação das análises
+    # ------------------------------------------------------------
+    # Diferentemente de st.tabs(), o segmented_control informa qual
+    # visão foi selecionada. Dessa forma, somente o bloco necessário
+    # é executado e as consultas das outras visões não são carregadas.
+    opcoes_visao = [
+        "Mensal (KPI)",
+        "Diário (séries)",
+        "Ataque (quadrantes)",
+        "Evolução mensal",
+        "Inatividade (itens)",
+    ]
+
+    visao_selecionada = st.segmented_control(
+        "Visão de análise",
+        options=opcoes_visao,
+        selection_mode="single",
+        default="Mensal (KPI)",
+        key="visao_analise_estoques_mast",
+        label_visibility="collapsed",
+        width="stretch",
     )
 
-    with tab1:
+    # Proteção defensiva: no modo de seleção única o componente pode
+    # retornar None caso a seleção seja limpa pelo estado da sessão.
+    if visao_selecionada is None:
+        visao_selecionada = "Mensal (KPI)"
+
+    if visao_selecionada == "Mensal (KPI)":
         kpi = load_kpi_mensal_mast(
         db_path,
         mes_ref,
@@ -2311,7 +2956,7 @@ def run():
             st.plotly_chart(fig_line, width="stretch", key=f"line_saldo_{mes_ref}")
             st.divider()
 
-    with tab2:
+    elif visao_selecionada == "Diário (séries)":
         st.subheader(f"Séries diárias — {mes_ref}")
 
         df_mb_d = load_mb51_diario_real_mes(
@@ -2463,7 +3108,7 @@ def run():
             fig_d3 = px.line(df_snap, x="dia", y="saldo_val", title=f"Saldo diário (snapshot) — {mes_ref}")
             st.plotly_chart(fig_d3, width="stretch", key=f"d3_saldo_val_{mes_ref}")
 
-    with tab3:
+    elif visao_selecionada == "Ataque (quadrantes)":
         st.subheader("Ataque por Quadrantes — MAST (valor e quantidade)")
 
         cA, cB, cC = st.columns([1, 1, 1])
@@ -2778,7 +3423,7 @@ def run():
             on_click="ignore",
         )
 
-    with tab4:
+    elif visao_selecionada == "Evolução mensal":
         st.markdown("### Evolução mensal — Entradas, Saldo e Giro")
 
         st.caption(
@@ -3360,3 +4005,645 @@ def run():
                 "Saldo = último snapshot MAST do mês; "
                 "Giro = Entradas ÷ Saldo."
             )
+
+    elif visao_selecionada == "Inatividade (itens)":
+        st.markdown("### Inatividade de saída — Materiais críticos")
+
+        st.caption(
+            "Visão atual do estoque MAST. Considera materiais com saldo "
+            "positivo, sem saída no histórico disponível ou com mais de "
+            "90 dias sem saída. Os movimentos 343 e 344 são sempre "
+            "desconsiderados nesta análise."
+        )
+
+        # As classificações utilizam duas janelas diferentes:
+        # 30 dias para identificar uma entrada recente e 90 dias para
+        # caracterizar ausência recente de saída ou de movimentação.
+        st.info(
+            "**Regras temporais da análise:** "
+            "entrada recente significa que a última entrada ocorreu há "
+            "até **30 dias**. Sem saída recente significa que a última "
+            "saída ocorreu há mais de **90 dias** ou não existe no "
+            "histórico disponível. Sem movimentação recente significa "
+            "que não houve entrada nem saída nos últimos **90 dias**."
+        )
+
+        # O spinner informa claramente que a consulta está em andamento.
+        # show_time=True apresenta o tempo decorrido durante a espera.
+        # Quando o resultado estiver no cache, o componente desaparecerá
+        # quase imediatamente.
+        with st.spinner(
+            "Analisando saldo e movimentações do MAST...",
+            show_time=True,
+            width="stretch",
+        ):
+            df_inatividade = load_inatividade_mast(
+                db_path,
+            )
+
+        if df_inatividade.empty:
+            st.info(
+                "Nenhum material crítico de inatividade foi encontrado."
+            )
+        else:
+            # --------------------------------------------------------
+            # Datas de auditoria
+            # --------------------------------------------------------
+            # Como todas as linhas utilizam a mesma fotografia, basta
+            # consultar o primeiro registro para apresentar as datas.
+            data_referencia = pd.to_datetime(
+                df_inatividade.iloc[0]["data_referencia"],
+                errors="coerce",
+            )
+
+            data_saldo_inatividade = pd.to_datetime(
+                df_inatividade.iloc[0]["data_saldo"],
+                errors="coerce",
+            )
+
+            data_referencia_texto = (
+                data_referencia.strftime("%d/%m/%Y")
+                if not pd.isna(data_referencia)
+                else "Não disponível"
+            )
+
+            data_saldo_texto = (
+                data_saldo_inatividade.strftime("%d/%m/%Y")
+                if not pd.isna(data_saldo_inatividade)
+                else "Não disponível"
+            )
+
+            st.caption(
+                f"Dados conciliados até {data_referencia_texto} | "
+                f"Saldo utilizado: {data_saldo_texto}"
+            )
+
+            # --------------------------------------------------------
+            # Indicadores executivos
+            # --------------------------------------------------------
+            total_materiais_criticos = int(
+                len(df_inatividade)
+            )
+
+            valor_total_critico = float(
+                df_inatividade["valor_atual"].sum()
+            )
+
+            mascara_entrada_recente = (
+                df_inatividade["situacao_operacional"]
+                == "ENTRADA RECENTE SEM SAÍDA RECENTE"
+            )
+
+            materiais_entrada_recente = int(
+                mascara_entrada_recente.sum()
+            )
+
+            valor_entrada_recente = float(
+                df_inatividade.loc[
+                    mascara_entrada_recente,
+                    "valor_atual",
+                ].sum()
+            )
+
+            # Um material é completamente parado quando não possui
+            # qualquer movimentação operacional há mais de 90 dias.
+            # Essa condição inclui materiais com saída histórica e
+            # materiais sem saída em todo o período disponível.
+            mascara_completamente_parado = (
+                pd.to_numeric(
+                    df_inatividade["dias_sem_movimentacao"],
+                    errors="coerce",
+                ).fillna(0)
+                > 90
+            )
+
+            materiais_completamente_parados = int(
+                mascara_completamente_parado.sum()
+            )
+
+            valor_completamente_parado = float(
+                df_inatividade.loc[
+                    mascara_completamente_parado,
+                    "valor_atual",
+                ].sum()
+            )
+
+            indicador1, indicador2, indicador3, indicador4 = st.columns(4)
+
+            with indicador1:
+                st.metric(
+                    "Materiais críticos",
+                    f"{total_materiais_criticos}",
+                    help=(
+                        "Materiais com saldo positivo, sem saída no "
+                        "histórico disponível ou com mais de 90 dias "
+                        "sem saída."
+                    ),
+                )
+
+            with indicador2:
+                st.metric(
+                    "Valor crítico",
+                    f"R$ {_fmt_ptbr_num(valor_total_critico, 2)}",
+                    help=(
+                        "Valor atual dos materiais classificados como "
+                        "críticos de inatividade."
+                    ),
+                )
+
+            with indicador3:
+                st.metric(
+                    "Entrada recente sem saída",
+                    f"{materiais_entrada_recente} materiais",
+                    help=(
+                        "Materiais com entrada nos últimos 30 dias e "
+                        "sem saída recente."
+                    ),
+                )
+
+                st.caption(
+                    f"R$ {_fmt_ptbr_num(valor_entrada_recente, 2)}"
+                )
+
+            with indicador4:
+                st.metric(
+                    "Estoque completamente parado",
+                    f"{materiais_completamente_parados} materiais",
+                    help=(
+                        "Materiais sem qualquer movimentação operacional "
+                        "há mais de 90 dias."
+                    ),
+                )
+
+                st.caption(
+                    f"R$ {_fmt_ptbr_num(valor_completamente_parado, 2)}"
+                )
+
+            st.divider()
+
+            # --------------------------------------------------------
+            # Filtros da tabela
+            # --------------------------------------------------------
+            st.markdown("#### Materiais prioritários")
+
+            ordem_situacoes = [
+                "ENTRADA RECENTE SEM SAÍDA RECENTE",
+                "SEM SAÍDA E SEM MOVIMENTAÇÃO RECENTE",
+                "SEM SAÍDA NO HISTÓRICO DISPONÍVEL",
+                "ESTOQUE COMPLETAMENTE PARADO",
+                "MAIS DE 180 DIAS SEM SAÍDA",
+                "91 A 180 DIAS SEM SAÍDA",
+            ]
+
+            situacoes_disponiveis = [
+                situacao
+                for situacao in ordem_situacoes
+                if situacao
+                in df_inatividade["situacao_operacional"].unique()
+            ]
+
+            # --------------------------------------------------------
+            # Gráfico opcional
+            # --------------------------------------------------------
+            # O gráfico é construído somente quando solicitado pelo
+            # usuário. Assim, a tabela principal permanece compacta e
+            # não existe custo de renderização desnecessário.
+            mostrar_grafico_inatividade = st.checkbox(
+                "Mostrar distribuição financeira por situação",
+                value=False,
+                key="mostrar_grafico_inatividade_mast",
+            )
+
+            if mostrar_grafico_inatividade:
+                resumo_inatividade = (
+                    df_inatividade.groupby(
+                        "situacao_operacional",
+                        as_index=False,
+                    )
+                    .agg(
+                        materiais=("material", "count"),
+                        valor_atual=("valor_atual", "sum"),
+                    )
+                )
+
+                ordem_situacoes_mapa = {
+                    situacao: posicao
+                    for posicao, situacao in enumerate(
+                        ordem_situacoes
+                    )
+                }
+
+                resumo_inatividade["ordem"] = (
+                    resumo_inatividade[
+                        "situacao_operacional"
+                    ].map(ordem_situacoes_mapa)
+                )
+
+                resumo_inatividade = (
+                    resumo_inatividade.sort_values(
+                        "ordem",
+                    ).reset_index(drop=True)
+                )
+
+                resumo_inatividade["valor_formatado"] = (
+                    resumo_inatividade["valor_atual"].map(
+                        lambda valor: (
+                            f"R$ {_fmt_ptbr_num(valor, 2)}"
+                        )
+                    )
+                )
+
+                cores_situacoes = {
+                    "ENTRADA RECENTE SEM SAÍDA RECENTE": "#E15759",
+                    "SEM SAÍDA E SEM MOVIMENTAÇÃO RECENTE": "#B22222",
+                    "SEM SAÍDA NO HISTÓRICO DISPONÍVEL": "#F28E2B",
+                    "ESTOQUE COMPLETAMENTE PARADO": "#6B7280",
+                    "MAIS DE 180 DIAS SEM SAÍDA": "#B279A2",
+                    "91 A 180 DIAS SEM SAÍDA": "#4C78A8",
+                }
+
+                dados_hover = np.column_stack(
+                    (
+                        resumo_inatividade["materiais"],
+                        resumo_inatividade["valor_formatado"],
+                    )
+                )
+
+                figura_inatividade = go.Figure(
+                    go.Bar(
+                        x=resumo_inatividade["valor_atual"],
+                        y=resumo_inatividade[
+                            "situacao_operacional"
+                        ],
+                        orientation="h",
+                        marker_color=[
+                            cores_situacoes.get(
+                                situacao,
+                                "#4C78A8",
+                            )
+                            for situacao in resumo_inatividade[
+                                "situacao_operacional"
+                            ]
+                        ],
+                        text=resumo_inatividade[
+                            "valor_formatado"
+                        ],
+                        textposition="outside",
+                        customdata=dados_hover,
+                        hovertemplate=(
+                            "%{y}<br>"
+                            "Materiais: %{customdata[0]}<br>"
+                            "Valor: %{customdata[1]}"
+                            "<extra></extra>"
+                        ),
+                    )
+                )
+
+                figura_inatividade.update_layout(
+                    title="Valor crítico por situação operacional",
+                    height=430,
+                    margin={
+                        "l": 20,
+                        "r": 140,
+                        "t": 60,
+                        "b": 40,
+                    },
+                    showlegend=False,
+                )
+
+                figura_inatividade.update_xaxes(
+                    title_text="Valor atual (R$)",
+                    rangemode="tozero",
+                )
+
+                figura_inatividade.update_yaxes(
+                    title_text="",
+                    autorange="reversed",
+                )
+
+                st.plotly_chart(
+                    figura_inatividade,
+                    width="stretch",
+                    key="grafico_inatividade_mast",
+                )
+
+            filtro_situacao_col, filtro_top_col = st.columns(
+                [3, 1]
+            )
+
+            situacoes_selecionadas = st.multiselect(
+                "Situação operacional",
+                options=situacoes_disponiveis,
+                default=[],
+                key="filtro_situacao_inatividade_mast",
+                placeholder="Todas as situações",
+                help=(
+                    "Sem seleção, todas as situações operacionais são "
+                    "consideradas. Entrada recente: última entrada há até "
+                    "30 dias. Sem saída recente: última saída há mais de "
+                    "90 dias ou inexistente no histórico disponível. "
+                    "Sem movimentação recente: nenhuma entrada ou saída "
+                    "nos últimos 90 dias. Todos os prazos são contados a "
+                    "partir da data de referência apresentada na tela."
+                ),
+            )
+
+            with filtro_top_col:
+                limite_exibicao = st.selectbox(
+                    "Quantidade exibida",
+                    options=[
+                        "Top 20",
+                        "Top 50",
+                        "Todos",
+                    ],
+                    index=0,
+                    key="limite_inatividade_mast",
+                )
+
+            filtro_material_col, filtro_valor_col = st.columns(
+                [2, 1]
+            )
+
+            with filtro_material_col:
+                filtro_material = st.text_input(
+                    "Consultar código ou descrição",
+                    value="",
+                    key="filtro_material_inatividade_mast",
+                    placeholder="Ex.: 4822015 ou NOBREAK",
+                )
+
+            with filtro_valor_col:
+                valor_minimo = st.number_input(
+                    "Valor mínimo do saldo (R$)",
+                    min_value=0.0,
+                    value=0.0,
+                    step=100.0,
+                    key="valor_minimo_inatividade_mast",
+                )
+
+            somente_entrada_recente = st.checkbox(
+                "Mostrar somente entrada recente sem saída recente",
+                value=False,
+                key="somente_entrada_recente_inatividade_mast",
+                help=(
+                    "Quando marcado, este filtro substitui a seleção "
+                    "de situações operacionais acima."
+                ),
+            )
+
+            # --------------------------------------------------------
+            # Aplicação dos filtros
+            # --------------------------------------------------------
+            df_inatividade_filtrado = df_inatividade.copy()
+
+            if somente_entrada_recente:
+                df_inatividade_filtrado = (
+                    df_inatividade_filtrado[
+                        df_inatividade_filtrado[
+                            "situacao_operacional"
+                        ]
+                        == "ENTRADA RECENTE SEM SAÍDA RECENTE"
+                    ].copy()
+                )
+            elif situacoes_selecionadas:
+                df_inatividade_filtrado = (
+                    df_inatividade_filtrado[
+                        df_inatividade_filtrado[
+                            "situacao_operacional"
+                        ].isin(situacoes_selecionadas)
+                    ].copy()
+                )
+
+            # Sem situações selecionadas, o dataframe permanece completo.
+            # Esse comportamento representa visualmente "Todas".
+            else:
+                # Nenhuma situação selecionada representa um recorte
+                # vazio, evitando que a ausência de seleção seja
+                # interpretada como "mostrar tudo".
+                df_inatividade_filtrado = (
+                    df_inatividade_filtrado.iloc[0:0].copy()
+                )
+
+            termo_material = filtro_material.strip()
+
+            if termo_material:
+                material_texto = (
+                    df_inatividade_filtrado["material"]
+                    .astype(str)
+                )
+
+                descricao_texto = (
+                    df_inatividade_filtrado["descricao"]
+                    .fillna("")
+                    .astype(str)
+                )
+
+                mascara_busca = (
+                    material_texto.str.contains(
+                        termo_material,
+                        case=False,
+                        regex=False,
+                    )
+                    | descricao_texto.str.contains(
+                        termo_material,
+                        case=False,
+                        regex=False,
+                    )
+                )
+
+                df_inatividade_filtrado = (
+                    df_inatividade_filtrado[
+                        mascara_busca
+                    ].copy()
+                )
+
+            df_inatividade_filtrado = (
+                df_inatividade_filtrado[
+                    pd.to_numeric(
+                        df_inatividade_filtrado["valor_atual"],
+                        errors="coerce",
+                    ).fillna(0.0)
+                    >= float(valor_minimo)
+                ].copy()
+            )
+
+            df_inatividade_filtrado = (
+                df_inatividade_filtrado.sort_values(
+                    [
+                        "prioridade",
+                        "valor_atual",
+                        "dias_sem_saida",
+                    ],
+                    ascending=[
+                        True,
+                        False,
+                        False,
+                    ],
+                ).reset_index(drop=True)
+            )
+
+            quantidade_filtrada = int(
+                len(df_inatividade_filtrado)
+            )
+
+            valor_filtrado = float(
+                df_inatividade_filtrado["valor_atual"].sum()
+            )
+
+            st.caption(
+                f"Recorte filtrado: {quantidade_filtrada} materiais | "
+                f"R$ {_fmt_ptbr_num(valor_filtrado, 2)}"
+            )
+
+            # O Top N é aplicado somente após todos os filtros.
+            if limite_exibicao == "Top 20":
+                df_inatividade_exibicao = (
+                    df_inatividade_filtrado.head(20).copy()
+                )
+            elif limite_exibicao == "Top 50":
+                df_inatividade_exibicao = (
+                    df_inatividade_filtrado.head(50).copy()
+                )
+            else:
+                df_inatividade_exibicao = (
+                    df_inatividade_filtrado.copy()
+                )
+
+            if df_inatividade_exibicao.empty:
+                st.info(
+                    "Nenhum material encontrado para os filtros "
+                    "selecionados."
+                )
+            else:
+                # ----------------------------------------------------
+                # Preparação da tabela visual
+                # ----------------------------------------------------
+                df_tabela_inatividade = df_inatividade_exibicao[
+                    [
+                        "material",
+                        "descricao",
+                        "quantidade_atual",
+                        "valor_atual",
+                        "ultima_entrada",
+                        "ultima_saida",
+                        "dias_sem_saida",
+                        "ultima_movimentacao",
+                        "dias_sem_movimentacao",
+                        "situacao_operacional",
+                    ]
+                ].copy()
+
+                for coluna_data in [
+                    "ultima_entrada",
+                    "ultima_saida",
+                    "ultima_movimentacao",
+                ]:
+                    df_tabela_inatividade[coluna_data] = (
+                        pd.to_datetime(
+                            df_tabela_inatividade[coluna_data],
+                            errors="coerce",
+                        ).dt.strftime("%d/%m/%Y")
+                    )
+
+                df_tabela_inatividade = (
+                    df_tabela_inatividade.rename(
+                        columns={
+                            "material": "Material",
+                            "descricao": "Descrição",
+                            "quantidade_atual": "Quantidade atual",
+                            "valor_atual": "Valor atual (R$)",
+                            "ultima_entrada": "Última entrada",
+                            "ultima_saida": "Última saída",
+                            "dias_sem_saida": "Dias sem saída",
+                            "ultima_movimentacao": "Último movimento",
+                            "dias_sem_movimentacao": (
+                                "Dias sem movimentação"
+                            ),
+                            "situacao_operacional": (
+                                "Situação operacional"
+                            ),
+                        }
+                    )
+                )
+
+                st.dataframe(
+                    df_tabela_inatividade,
+                    width="stretch",
+                    hide_index=True,
+                    column_config={
+                        "Material": st.column_config.TextColumn(
+                            "Material",
+                            width="small",
+                        ),
+                        "Descrição": st.column_config.TextColumn(
+                            "Descrição",
+                            width="large",
+                        ),
+                        "Quantidade atual": (
+                            st.column_config.NumberColumn(
+                                "Quantidade atual",
+                                format="localized",
+                            )
+                        ),
+                        "Valor atual (R$)": (
+                            st.column_config.NumberColumn(
+                                "Valor atual (R$)",
+                                format="localized",
+                            )
+                        ),
+                        "Dias sem saída": (
+                            st.column_config.NumberColumn(
+                                "Dias sem saída",
+                                format="%d",
+                            )
+                        ),
+                        "Dias sem movimentação": (
+                            st.column_config.NumberColumn(
+                                "Dias sem movimentação",
+                                format="%d",
+                            )
+                        ),
+                        "Situação operacional": (
+                            st.column_config.TextColumn(
+                                "Situação operacional",
+                                width="large",
+                            )
+                        ),
+                    },
+                )
+
+                st.caption(
+                    "A tabela está ordenada primeiro pela prioridade "
+                    "operacional e depois pelo maior valor atual."
+                )
+
+                # ----------------------------------------------------
+                # Exportação do recorte filtrado
+                # ----------------------------------------------------
+                # A exportação utiliza df_inatividade_filtrado, e não o
+                # dataframe limitado pelo Top 20/Top 50. Assim, todos os
+                # materiais do recorte solicitado são incluídos.
+                excel_inatividade = build_excel_inatividade_mast(
+                    df_inatividade_filtrado,
+                )
+
+                data_arquivo = str(
+                    df_inatividade.iloc[0]["data_referencia"]
+                ).replace("-", "")
+
+                st.download_button(
+                    label=(
+                        "Baixar Excel do recorte filtrado "
+                        f"({quantidade_filtrada} materiais)"
+                    ),
+                    data=excel_inatividade,
+                    file_name=(
+                        f"MAST_INATIVIDADE_{data_arquivo}.xlsx"
+                    ),
+                    mime=(
+                        "application/vnd.openxmlformats-officedocument."
+                        "spreadsheetml.sheet"
+                    ),
+                    key="download_excel_inatividade_mast",
+                    on_click="ignore",
+                )

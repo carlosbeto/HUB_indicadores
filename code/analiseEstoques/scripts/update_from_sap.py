@@ -551,6 +551,29 @@ def ensure_fact_snapshot(con: sqlite3.Connection):
         WHERE deposito = 'MAST';
     """)
 
+    # ------------------------------------------------------------------
+    # Índice para a análise de inatividade dos materiais do MAST
+    # ------------------------------------------------------------------
+    # A análise percorre o histórico de cada material para localizar a
+    # primeira fotografia em que existia saldo positivo.
+    #
+    # A ordem material + snapshot_date permite ao SQLite localizar o
+    # histórico cronológico de cada material sem reorganizar toda a tabela.
+    #
+    # qtd_total e val_total permanecem no próprio índice porque são usados
+    # para identificar se o material possuía saldo naquela fotografia.
+    con.execute("""
+        CREATE INDEX IF NOT EXISTS idx_snapshot_inatividade_mast
+        ON fact_estoque_snapshot (
+            material,
+            snapshot_date,
+            qtd_total,
+            val_total
+        )
+        WHERE deposito = 'MAST';
+    """)
+
+
 def upsert_snapshot(con: sqlite3.Connection, df: pd.DataFrame, snapshot_date: str, source_file: str):
     """
     Upsert (insert/update) do snapshot de estoque no SQLite.
@@ -708,6 +731,34 @@ def ensure_fact_mb51_mov(con: sqlite3.Connection):
         WHERE deposito = 'MAST'
           AND deb_cred = 'S'
           AND TRIM(COALESCE(ordem, '')) = '';
+    """)
+
+    # ------------------------------------------------------------------
+    # Índice para a análise de inatividade dos materiais do MAST
+    # ------------------------------------------------------------------
+    # A consulta precisa localizar rapidamente, para cada material:
+    #
+    # - a última entrada operacional;
+    # - a última saída;
+    # - a última movimentação existente.
+    #
+    # material e data_lancamento organizam o histórico cronológico.
+    # deb_cred e ordem permitem avaliar entradas e saídas consultando
+    # diretamente o índice.
+    #
+    # O índice é parcial e exclui os movimentos técnicos 343 e 344,
+    # que não devem reiniciar o tempo de inatividade operacional.
+    con.execute("""
+        CREATE INDEX IF NOT EXISTS idx_mb51_inatividade_mast
+        ON fact_mb51_mov (
+            material,
+            data_lancamento,
+            deb_cred,
+            ordem
+        )
+        WHERE deposito = 'MAST'
+          AND TRIM(COALESCE(tipo_movimento, ''))
+              NOT IN ('343', '344');
     """)
 
 def ensure_mb51_schema(con: sqlite3.Connection):

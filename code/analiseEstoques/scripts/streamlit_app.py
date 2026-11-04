@@ -1860,6 +1860,103 @@ def load_inatividade_mast(
 # APP (tudo que usa st.* fica aqui dentro)
 # =============================================================================
 
+def filtrar_inatividade_mast(
+    df_inatividade: pd.DataFrame,
+    situacoes_selecionadas: list[str] | tuple[str, ...] | None = None,
+    filtro_material: str = "",
+    valor_minimo: float = 0.0,
+    somente_entrada_recente: bool = False,
+) -> pd.DataFrame:
+    """
+    Aplica os filtros da visão de inatividade do estoque MAST.
+
+    A função fica separada da interface Streamlit para que as regras possam
+    ser validadas diretamente por testes automatizados.
+
+    Regras:
+    - nenhuma situação selecionada representa "Todas as situações";
+    - o filtro específico de entrada recente tem prioridade sobre a seleção
+      de situações operacionais;
+    - a pesquisa aceita parte do código ou da descrição do material;
+    - a pesquisa não diferencia letras maiúsculas e minúsculas;
+    - o valor atual deve ser maior ou igual ao mínimo informado;
+    - o resultado mantém a ordenação operacional usada pela tabela.
+    """
+
+    resultado = df_inatividade.copy()
+
+    if somente_entrada_recente:
+        # Este filtro específico substitui a seleção comum de situações.
+        resultado = resultado[
+            resultado["situacao_operacional"]
+            == "ENTRADA RECENTE SEM SAÍDA RECENTE"
+        ].copy()
+
+    elif situacoes_selecionadas:
+        # Uma ou mais situações selecionadas restringem o recorte.
+        resultado = resultado[
+            resultado["situacao_operacional"].isin(
+                situacoes_selecionadas
+            )
+        ].copy()
+
+    # Quando a seleção está vazia, nenhuma filtragem por situação é
+    # aplicada. Esse comportamento representa "Todas as situações".
+
+    termo_material = (filtro_material or "").strip()
+
+    if termo_material:
+        material_texto = (
+            resultado["material"]
+            .fillna("")
+            .astype(str)
+        )
+
+        descricao_texto = (
+            resultado["descricao"]
+            .fillna("")
+            .astype(str)
+        )
+
+        mascara_busca = (
+            material_texto.str.contains(
+                termo_material,
+                case=False,
+                regex=False,
+            )
+            | descricao_texto.str.contains(
+                termo_material,
+                case=False,
+                regex=False,
+            )
+        )
+
+        resultado = resultado[mascara_busca].copy()
+
+    valor_atual_numerico = pd.to_numeric(
+        resultado["valor_atual"],
+        errors="coerce",
+    ).fillna(0.0)
+
+    resultado = resultado[
+        valor_atual_numerico >= float(valor_minimo)
+    ].copy()
+
+    resultado = resultado.sort_values(
+        [
+            "prioridade",
+            "valor_atual",
+            "dias_sem_saida",
+        ],
+        ascending=[
+            True,
+            False,
+            False,
+        ],
+    ).reset_index(drop=True)
+
+    return resultado
+
 @_cache_data(ttl=120)
 def build_excel_inatividade_mast(
     df_inatividade: pd.DataFrame,
@@ -4394,92 +4491,18 @@ def run():
             # --------------------------------------------------------
             # Aplicação dos filtros
             # --------------------------------------------------------
-            df_inatividade_filtrado = df_inatividade.copy()
-
-            if somente_entrada_recente:
-                df_inatividade_filtrado = (
-                    df_inatividade_filtrado[
-                        df_inatividade_filtrado[
-                            "situacao_operacional"
-                        ]
-                        == "ENTRADA RECENTE SEM SAÍDA RECENTE"
-                    ].copy()
-                )
-            elif situacoes_selecionadas:
-                df_inatividade_filtrado = (
-                    df_inatividade_filtrado[
-                        df_inatividade_filtrado[
-                            "situacao_operacional"
-                        ].isin(situacoes_selecionadas)
-                    ].copy()
-                )
-
-            # Sem situações selecionadas, o dataframe permanece completo.
-            # Esse comportamento representa visualmente "Todas".
-            else:
-                # Nenhuma situação selecionada representa um recorte
-                # vazio, evitando que a ausência de seleção seja
-                # interpretada como "mostrar tudo".
-                df_inatividade_filtrado = (
-                    df_inatividade_filtrado.iloc[0:0].copy()
-                )
-
-            termo_material = filtro_material.strip()
-
-            if termo_material:
-                material_texto = (
-                    df_inatividade_filtrado["material"]
-                    .astype(str)
-                )
-
-                descricao_texto = (
-                    df_inatividade_filtrado["descricao"]
-                    .fillna("")
-                    .astype(str)
-                )
-
-                mascara_busca = (
-                    material_texto.str.contains(
-                        termo_material,
-                        case=False,
-                        regex=False,
-                    )
-                    | descricao_texto.str.contains(
-                        termo_material,
-                        case=False,
-                        regex=False,
-                    )
-                )
-
-                df_inatividade_filtrado = (
-                    df_inatividade_filtrado[
-                        mascara_busca
-                    ].copy()
-                )
-
-            df_inatividade_filtrado = (
-                df_inatividade_filtrado[
-                    pd.to_numeric(
-                        df_inatividade_filtrado["valor_atual"],
-                        errors="coerce",
-                    ).fillna(0.0)
-                    >= float(valor_minimo)
-                ].copy()
-            )
-
-            df_inatividade_filtrado = (
-                df_inatividade_filtrado.sort_values(
-                    [
-                        "prioridade",
-                        "valor_atual",
-                        "dias_sem_saida",
-                    ],
-                    ascending=[
-                        True,
-                        False,
-                        False,
-                    ],
-                ).reset_index(drop=True)
+                        # --------------------------------------------------------
+            # Aplicação centralizada dos filtros
+            # --------------------------------------------------------
+            # A regra fica em uma função independente do Streamlit para
+            # permitir testes automatizados e evitar diferenças entre a
+            # interface e a regra de negócio.
+            df_inatividade_filtrado = filtrar_inatividade_mast(
+                df_inatividade=df_inatividade,
+                situacoes_selecionadas=situacoes_selecionadas,
+                filtro_material=filtro_material,
+                valor_minimo=float(valor_minimo),
+                somente_entrada_recente=somente_entrada_recente,
             )
 
             quantidade_filtrada = int(

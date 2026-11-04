@@ -9,6 +9,7 @@ import pytest
 
 from analiseEstoques.scripts.streamlit_app import (
     build_excel_inatividade_mast,
+    filtrar_inatividade_mast,
     load_inatividade_mast,
 )
 
@@ -559,4 +560,71 @@ def test_excel_inatividade_documenta_janelas_temporais(
 
     assert int(parametros["Materiais exportados"]) == len(
         resultado
+    )
+
+def test_filtro_inatividade_sem_situacao_representa_todas() -> None:
+    """
+    A seleção vazia de situações representa "Todas as situações".
+
+    Este teste protege a pesquisa por material contra a regressão em que
+    o DataFrame era esvaziado antes da aplicação do código ou descrição.
+    """
+
+    dados = pd.DataFrame(
+        [
+            {
+                "material": "4301126",
+                "descricao": (
+                    "INVERSOR EX MONO 220V/60HZ G IN010KEXG"
+                ),
+                "valor_atual": 9242.74,
+                "situacao_operacional": (
+                    "SEM SAÍDA E SEM MOVIMENTAÇÃO RECENTE"
+                ),
+                "prioridade": 1,
+                "dias_sem_saida": 122,
+            },
+            {
+                "material": "4822015",
+                "descricao": "NOBREAK TESTE",
+                "valor_atual": 1000.00,
+                "situacao_operacional": (
+                    "ENTRADA RECENTE SEM SAÍDA RECENTE"
+                ),
+                "prioridade": 2,
+                "dias_sem_saida": 100,
+            },
+        ]
+    )
+
+    # Sem situações selecionadas, todos os materiais permanecem no recorte.
+    resultado_todas = filtrar_inatividade_mast(
+        df_inatividade=dados,
+        situacoes_selecionadas=[],
+        filtro_material="",
+        valor_minimo=0.0,
+        somente_entrada_recente=False,
+    )
+
+    assert set(resultado_todas["material"]) == {
+        "4301126",
+        "4822015",
+    }
+
+    # A pesquisa é aplicada sobre o conjunto completo representado por
+    # "Todas as situações".
+    resultado_pesquisa = filtrar_inatividade_mast(
+        df_inatividade=dados,
+        situacoes_selecionadas=[],
+        filtro_material="4301126",
+        valor_minimo=0.0,
+        somente_entrada_recente=False,
+    )
+
+    assert resultado_pesquisa["material"].tolist() == [
+        "4301126",
+    ]
+
+    assert resultado_pesquisa.iloc[0]["situacao_operacional"] == (
+        "SEM SAÍDA E SEM MOVIMENTAÇÃO RECENTE"
     )

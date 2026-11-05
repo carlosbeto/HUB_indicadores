@@ -4439,110 +4439,17 @@ def run():
             )
 
             # --------------------------------------------------------
-            # Indicadores executivos
+            # Contêiner reservado para os indicadores executivos
             # --------------------------------------------------------
-            total_materiais_criticos = int(
-                len(df_inatividade)
-            )
-
-            valor_total_critico = float(
-                df_inatividade["valor_atual"].sum()
-            )
-
-            mascara_entrada_recente = (
-                df_inatividade["situacao_operacional"]
-                == "ENTRADA RECENTE SEM SAÍDA RECENTE"
-            )
-
-            materiais_entrada_recente = int(
-                mascara_entrada_recente.sum()
-            )
-
-            valor_entrada_recente = float(
-                df_inatividade.loc[
-                    mascara_entrada_recente,
-                    "valor_atual",
-                ].sum()
-            )
-
-            # Um material é completamente parado quando não possui
-            # qualquer movimentação operacional há mais de 90 dias.
-            # Essa condição inclui materiais com saída histórica e
-            # materiais sem saída em todo o período disponível.
-            mascara_completamente_parado = (
-                pd.to_numeric(
-                    df_inatividade["dias_sem_movimentacao"],
-                    errors="coerce",
-                ).fillna(0)
-                > 90
-            )
-
-            materiais_completamente_parados = int(
-                mascara_completamente_parado.sum()
-            )
-
-            valor_completamente_parado = float(
-                df_inatividade.loc[
-                    mascara_completamente_parado,
-                    "valor_atual",
-                ].sum()
-            )
-
-            indicador1, indicador2, indicador3, indicador4 = st.columns(4)
-
-            with indicador1:
-                st.metric(
-                    "Materiais críticos",
-                    f"{total_materiais_criticos}",
-                    help=(
-                        "Materiais com saldo positivo, sem saída no "
-                        "histórico disponível ou com mais de 90 dias "
-                        "sem saída."
-                    ),
-                )
-
-            with indicador2:
-                st.metric(
-                    "Valor crítico",
-                    f"R$ {_fmt_ptbr_num(valor_total_critico, 2)}",
-                    help=(
-                        "Valor atual dos materiais classificados como "
-                        "críticos de inatividade."
-                    ),
-                )
-
-            with indicador3:
-                st.metric(
-                    "Entrada recente sem saída",
-                    f"{materiais_entrada_recente} materiais",
-                    help=(
-                        "Materiais com entrada nos últimos 30 dias e "
-                        "sem saída recente."
-                    ),
-                )
-
-                st.caption(
-                    f"R$ {_fmt_ptbr_num(valor_entrada_recente, 2)}"
-                )
-
-            with indicador4:
-                st.metric(
-                    "Estoque completamente parado",
-                    f"{materiais_completamente_parados} materiais",
-                    help=(
-                        "Materiais sem qualquer movimentação operacional "
-                        "há mais de 90 dias."
-                    ),
-                )
-
-                st.caption(
-                    f"R$ {_fmt_ptbr_num(valor_completamente_parado, 2)}"
-                )
+            # O contêiner é criado nesta posição para preservar o layout
+            # atual da página. Seu conteúdo será preenchido somente depois
+            # que todos os filtros operacionais forem conhecidos.
+            indicadores_inatividade_container = st.container()
 
             st.divider()
 
             # --------------------------------------------------------
-            # Filtros da tabela
+            # Filtros dos materiais prioritários
             # --------------------------------------------------------
             st.markdown("#### Materiais prioritários")
 
@@ -4562,130 +4469,18 @@ def run():
                 in df_inatividade["situacao_operacional"].unique()
             ]
 
-            # --------------------------------------------------------
-            # Gráfico opcional
-            # --------------------------------------------------------
-            # O gráfico é construído somente quando solicitado pelo
-            # usuário. Assim, a tabela principal permanece compacta e
-            # não existe custo de renderização desnecessário.
+            # O gráfico continua opcional para evitar processamento e
+            # renderização quando o usuário não precisa dessa visualização.
             mostrar_grafico_inatividade = st.checkbox(
                 "Mostrar distribuição financeira por situação",
                 value=False,
                 key="mostrar_grafico_inatividade_mast",
             )
 
-            if mostrar_grafico_inatividade:
-                resumo_inatividade = (
-                    df_inatividade.groupby(
-                        "situacao_operacional",
-                        as_index=False,
-                    )
-                    .agg(
-                        materiais=("material", "count"),
-                        valor_atual=("valor_atual", "sum"),
-                    )
-                )
-
-                ordem_situacoes_mapa = {
-                    situacao: posicao
-                    for posicao, situacao in enumerate(
-                        ordem_situacoes
-                    )
-                }
-
-                resumo_inatividade["ordem"] = (
-                    resumo_inatividade[
-                        "situacao_operacional"
-                    ].map(ordem_situacoes_mapa)
-                )
-
-                resumo_inatividade = (
-                    resumo_inatividade.sort_values(
-                        "ordem",
-                    ).reset_index(drop=True)
-                )
-
-                resumo_inatividade["valor_formatado"] = (
-                    resumo_inatividade["valor_atual"].map(
-                        lambda valor: (
-                            f"R$ {_fmt_ptbr_num(valor, 2)}"
-                        )
-                    )
-                )
-
-                cores_situacoes = {
-                    "ENTRADA RECENTE SEM SAÍDA RECENTE": "#E15759",
-                    "SEM SAÍDA E SEM MOVIMENTAÇÃO RECENTE": "#B22222",
-                    "SEM SAÍDA NO HISTÓRICO DISPONÍVEL": "#F28E2B",
-                    "ESTOQUE COMPLETAMENTE PARADO": "#6B7280",
-                    "MAIS DE 180 DIAS SEM SAÍDA": "#B279A2",
-                    "91 A 180 DIAS SEM SAÍDA": "#4C78A8",
-                }
-
-                dados_hover = np.column_stack(
-                    (
-                        resumo_inatividade["materiais"],
-                        resumo_inatividade["valor_formatado"],
-                    )
-                )
-
-                figura_inatividade = go.Figure(
-                    go.Bar(
-                        x=resumo_inatividade["valor_atual"],
-                        y=resumo_inatividade[
-                            "situacao_operacional"
-                        ],
-                        orientation="h",
-                        marker_color=[
-                            cores_situacoes.get(
-                                situacao,
-                                "#4C78A8",
-                            )
-                            for situacao in resumo_inatividade[
-                                "situacao_operacional"
-                            ]
-                        ],
-                        text=resumo_inatividade[
-                            "valor_formatado"
-                        ],
-                        textposition="outside",
-                        customdata=dados_hover,
-                        hovertemplate=(
-                            "%{y}<br>"
-                            "Materiais: %{customdata[0]}<br>"
-                            "Valor: %{customdata[1]}"
-                            "<extra></extra>"
-                        ),
-                    )
-                )
-
-                figura_inatividade.update_layout(
-                    title="Valor crítico por situação operacional",
-                    height=430,
-                    margin={
-                        "l": 20,
-                        "r": 140,
-                        "t": 60,
-                        "b": 40,
-                    },
-                    showlegend=False,
-                )
-
-                figura_inatividade.update_xaxes(
-                    title_text="Valor atual (R$)",
-                    rangemode="tozero",
-                )
-
-                figura_inatividade.update_yaxes(
-                    title_text="",
-                    autorange="reversed",
-                )
-
-                st.plotly_chart(
-                    figura_inatividade,
-                    width="stretch",
-                    key="grafico_inatividade_mast",
-                )
+            # O contêiner é criado aqui para manter o gráfico acima dos
+            # filtros operacionais, como na disposição visual atual.
+            # O conteúdo será calculado depois da aplicação dos filtros.
+            grafico_inatividade_container = st.container()
 
             filtro_situacao_col, filtro_top_col = st.columns(
                 [3, 1]
@@ -4755,8 +4550,12 @@ def run():
             # Aplicação centralizada dos filtros
             # --------------------------------------------------------
             # A regra fica em uma função independente do Streamlit para
-            # permitir testes automatizados e evitar diferenças entre a
-            # interface e a regra de negócio.
+            # permitir testes automatizados e evitar diferenças entre
+            # indicadores, gráfico, tabela e arquivo Excel.
+            #
+            # A partir deste ponto, todos os componentes analíticos usam
+            # exatamente o mesmo DataFrame filtrado. A única exceção é o
+            # Top 20/Top 50, aplicado posteriormente apenas na tabela.
             df_inatividade_filtrado = filtrar_inatividade_mast(
                 df_inatividade=df_inatividade,
                 situacoes_selecionadas=situacoes_selecionadas,
@@ -4764,6 +4563,260 @@ def run():
                 valor_minimo=float(valor_minimo),
                 somente_entrada_recente=somente_entrada_recente,
             )
+
+            # --------------------------------------------------------
+            # Indicadores executivos do recorte completo
+            # --------------------------------------------------------
+            total_materiais_criticos = int(
+                len(df_inatividade_filtrado)
+            )
+
+            valor_total_critico = float(
+                df_inatividade_filtrado["valor_atual"].sum()
+            )
+
+            mascara_entrada_recente = (
+                df_inatividade_filtrado["situacao_operacional"]
+                == "ENTRADA RECENTE SEM SAÍDA RECENTE"
+            )
+
+            materiais_entrada_recente = int(
+                mascara_entrada_recente.sum()
+            )
+
+            valor_entrada_recente = float(
+                df_inatividade_filtrado.loc[
+                    mascara_entrada_recente,
+                    "valor_atual",
+                ].sum()
+            )
+
+            # Um material é completamente parado quando não possui
+            # qualquer movimentação operacional há mais de 90 dias.
+            # Essa condição inclui materiais com saída histórica e
+            # materiais sem saída em todo o período disponível.
+            mascara_completamente_parado = (
+                pd.to_numeric(
+                    df_inatividade_filtrado[
+                        "dias_sem_movimentacao"
+                    ],
+                    errors="coerce",
+                ).fillna(0)
+                > 90
+            )
+
+            materiais_completamente_parados = int(
+                mascara_completamente_parado.sum()
+            )
+
+            valor_completamente_parado = float(
+                df_inatividade_filtrado.loc[
+                    mascara_completamente_parado,
+                    "valor_atual",
+                ].sum()
+            )
+
+            # O conteúdo é inserido no contêiner criado antes do divisor,
+            # preservando a posição original dos indicadores na página.
+            with indicadores_inatividade_container:
+                indicador1, indicador2, indicador3, indicador4 = (
+                    st.columns(4)
+                )
+
+                with indicador1:
+                    st.metric(
+                        "Materiais críticos",
+                        f"{total_materiais_criticos}",
+                        help=(
+                            "Materiais com saldo positivo, sem saída no "
+                            "histórico disponível ou com mais de 90 dias "
+                            "sem saída, considerando todos os filtros "
+                            "ativos na tela."
+                        ),
+                    )
+
+                with indicador2:
+                    st.metric(
+                        "Valor crítico",
+                        (
+                            "R$ "
+                            f"{_fmt_ptbr_num(valor_total_critico, 2)}"
+                        ),
+                        help=(
+                            "Valor atual dos materiais classificados como "
+                            "críticos de inatividade, considerando todos "
+                            "os filtros ativos na tela."
+                        ),
+                    )
+
+                with indicador3:
+                    st.metric(
+                        "Entrada recente sem saída",
+                        f"{materiais_entrada_recente} materiais",
+                        help=(
+                            "Materiais do recorte atual com entrada nos "
+                            "últimos 30 dias e sem saída recente."
+                        ),
+                    )
+
+                    st.caption(
+                        f"R$ {_fmt_ptbr_num(valor_entrada_recente, 2)}"
+                    )
+
+                with indicador4:
+                    st.metric(
+                        "Estoque completamente parado",
+                        f"{materiais_completamente_parados} materiais",
+                        help=(
+                            "Materiais do recorte atual sem qualquer "
+                            "movimentação operacional há mais de 90 dias."
+                        ),
+                    )
+
+                    st.caption(
+                        "R$ "
+                        f"{_fmt_ptbr_num(valor_completamente_parado, 2)}"
+                    )
+
+            # --------------------------------------------------------
+            # Gráfico do mesmo recorte utilizado pelos indicadores
+            # --------------------------------------------------------
+            with grafico_inatividade_container:
+                if mostrar_grafico_inatividade:
+                    if df_inatividade_filtrado.empty:
+                        st.info(
+                            "Nenhum material disponível para montar o "
+                            "gráfico com os filtros selecionados."
+                        )
+                    else:
+                        resumo_inatividade = (
+                            df_inatividade_filtrado.groupby(
+                                "situacao_operacional",
+                                as_index=False,
+                            )
+                            .agg(
+                                materiais=("material", "count"),
+                                valor_atual=("valor_atual", "sum"),
+                            )
+                        )
+
+                        ordem_situacoes_mapa = {
+                            situacao: posicao
+                            for posicao, situacao in enumerate(
+                                ordem_situacoes
+                            )
+                        }
+
+                        resumo_inatividade["ordem"] = (
+                            resumo_inatividade[
+                                "situacao_operacional"
+                            ].map(ordem_situacoes_mapa)
+                        )
+
+                        resumo_inatividade = (
+                            resumo_inatividade.sort_values(
+                                "ordem",
+                            ).reset_index(drop=True)
+                        )
+
+                        resumo_inatividade["valor_formatado"] = (
+                            resumo_inatividade["valor_atual"].map(
+                                lambda valor: (
+                                    f"R$ {_fmt_ptbr_num(valor, 2)}"
+                                )
+                            )
+                        )
+
+                        cores_situacoes = {
+                            (
+                                "ENTRADA RECENTE SEM SAÍDA RECENTE"
+                            ): "#E15759",
+                            (
+                                "SEM SAÍDA E SEM MOVIMENTAÇÃO RECENTE"
+                            ): "#B22222",
+                            (
+                                "SEM SAÍDA NO HISTÓRICO DISPONÍVEL"
+                            ): "#F28E2B",
+                            (
+                                "ESTOQUE COMPLETAMENTE PARADO"
+                            ): "#6B7280",
+                            (
+                                "MAIS DE 180 DIAS SEM SAÍDA"
+                            ): "#B279A2",
+                            (
+                                "91 A 180 DIAS SEM SAÍDA"
+                            ): "#4C78A8",
+                        }
+
+                        dados_hover = np.column_stack(
+                            (
+                                resumo_inatividade["materiais"],
+                                resumo_inatividade[
+                                    "valor_formatado"
+                                ],
+                            )
+                        )
+
+                        figura_inatividade = go.Figure(
+                            go.Bar(
+                                x=resumo_inatividade["valor_atual"],
+                                y=resumo_inatividade[
+                                    "situacao_operacional"
+                                ],
+                                orientation="h",
+                                marker_color=[
+                                    cores_situacoes.get(
+                                        situacao,
+                                        "#4C78A8",
+                                    )
+                                    for situacao
+                                    in resumo_inatividade[
+                                        "situacao_operacional"
+                                    ]
+                                ],
+                                text=resumo_inatividade[
+                                    "valor_formatado"
+                                ],
+                                textposition="outside",
+                                customdata=dados_hover,
+                                hovertemplate=(
+                                    "%{y}<br>"
+                                    "Materiais: %{customdata[0]}<br>"
+                                    "Valor: %{customdata[1]}"
+                                    "<extra></extra>"
+                                ),
+                            )
+                        )
+
+                        figura_inatividade.update_layout(
+                            title=(
+                                "Valor crítico por situação operacional"
+                            ),
+                            height=430,
+                            margin={
+                                "l": 20,
+                                "r": 140,
+                                "t": 60,
+                                "b": 40,
+                            },
+                            showlegend=False,
+                        )
+
+                        figura_inatividade.update_xaxes(
+                            title_text="Valor atual (R$)",
+                            rangemode="tozero",
+                        )
+
+                        figura_inatividade.update_yaxes(
+                            title_text="",
+                            autorange="reversed",
+                        )
+
+                        st.plotly_chart(
+                            figura_inatividade,
+                            width="stretch",
+                            key="grafico_inatividade_mast",
+                        )
 
             quantidade_filtrada = int(
                 len(df_inatividade_filtrado)

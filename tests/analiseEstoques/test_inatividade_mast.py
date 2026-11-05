@@ -860,3 +860,101 @@ def test_filtro_hierarquico_inatividade_respeita_encadeamento() -> None:
     assert resultado_segmento["material"].tolist() == [
         "ITEM-1",
     ]
+
+def test_filtro_inatividade_multiplas_situacoes_altera_recorte() -> None:
+    """
+    A seleção de situações operacionais deve produzir um único recorte
+    utilizado pelos indicadores, gráfico, tabela e arquivo Excel.
+
+    O teste protege o comportamento em que duas situações selecionadas
+    precisam resultar na soma exata de seus materiais e valores.
+    """
+
+    entrada_recente = "ENTRADA RECENTE SEM SAÍDA RECENTE"
+    sem_saida_historico = "SEM SAÍDA NO HISTÓRICO DISPONÍVEL"
+    estoque_parado = "ESTOQUE COMPLETAMENTE PARADO"
+
+    dados = pd.DataFrame(
+        [
+            {
+                "material": "MATERIAL-A",
+                "descricao": "Entrada recente",
+                "valor_atual": 33767.47,
+                "situacao_operacional": entrada_recente,
+                "prioridade": 1,
+                "dias_sem_saida": 120,
+                "dias_sem_movimentacao": 10,
+            },
+            {
+                "material": "MATERIAL-B",
+                "descricao": "Sem saída no histórico",
+                "valor_atual": 1504.84,
+                "situacao_operacional": sem_saida_historico,
+                "prioridade": 2,
+                "dias_sem_saida": 200,
+                "dias_sem_movimentacao": 130,
+            },
+            {
+                "material": "MATERIAL-C",
+                "descricao": "Estoque parado fora do recorte",
+                "valor_atual": 9000.00,
+                "situacao_operacional": estoque_parado,
+                "prioridade": 3,
+                "dias_sem_saida": 150,
+                "dias_sem_movimentacao": 150,
+            },
+        ]
+    )
+
+    resultado = filtrar_inatividade_mast(
+        df_inatividade=dados,
+        situacoes_selecionadas=[
+            entrada_recente,
+            sem_saida_historico,
+        ],
+    )
+
+    # Somente as duas situações selecionadas permanecem no recorte.
+    assert resultado["material"].tolist() == [
+        "MATERIAL-A",
+        "MATERIAL-B",
+    ]
+
+    assert len(resultado) == 2
+
+    assert resultado["valor_atual"].sum() == pytest.approx(
+        35272.31
+    )
+
+    assert set(resultado["situacao_operacional"]) == {
+        entrada_recente,
+        sem_saida_historico,
+    }
+
+    # As mesmas máscaras usadas pelos indicadores devem operar sobre
+    # o DataFrame filtrado, nunca sobre o conjunto organizacional completo.
+    mascara_entrada_recente = (
+        resultado["situacao_operacional"]
+        == entrada_recente
+    )
+
+    mascara_completamente_parado = (
+        pd.to_numeric(
+            resultado["dias_sem_movimentacao"],
+            errors="coerce",
+        ).fillna(0)
+        > 90
+    )
+
+    assert int(mascara_entrada_recente.sum()) == 1
+    assert int(mascara_completamente_parado.sum()) == 1
+
+    assert resultado.loc[
+        mascara_entrada_recente,
+        "valor_atual",
+    ].sum() == pytest.approx(33767.47)
+
+    assert resultado.loc[
+        mascara_completamente_parado,
+        "valor_atual",
+    ].sum() == pytest.approx(1504.84)

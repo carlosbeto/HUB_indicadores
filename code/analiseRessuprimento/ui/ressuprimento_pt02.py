@@ -8,6 +8,10 @@ que um componente visual altere silenciosamente uma regra operacional.
 """
 
 import sqlite3
+from io import BytesIO
+from datetime import datetime
+
+from repositories.estoque_repository import carregar_saldo_t001_por_posicao
 
 import pandas as pd
 import streamlit as st
@@ -17,7 +21,8 @@ from rules.ressuprimento_pt02 import (
     calcular_radar_ressuprimento_pt02,
 )
 from services.radar_ressuprimento_service import (
-    preparar_fila_prioritaria,
+    preparar_criticos_ressuprimento,
+    preparar_retiradas_t001,
 )
 
 
@@ -242,249 +247,199 @@ def _mostrar_detalhe_material(item: pd.Series) -> None:
         st.info("Confira a situação calculada pelo radar para este material.")
 
 
-def render_ressuprimento_pt02(
-    conn: sqlite3.Connection,
-    *,
-    usuario: dict,
-) -> None:
-    """Renderiza a fila diária priorizada pela demanda da MB51."""
+COLUNAS_RETIRADAS = {
+    "posicao_t001": "Origem T001", "material": "Material",
+    "descricao_material": "Descrição", "posicao": "Destino PT02",
+    "unidade_operacional": "UMB", "media_mensal_saida": "Média mensal",
+    "saldo_pt02_f5": "Saldo PT02 F5", "saldo_origem_f5": "Saldo origem F5",
+    "quantidade_retirar": "Qtd. retirar nesta origem",
+    "status_saldo_pt02": "Origem saldo PT02",
+    "status_parametrizacao_pt02": "Parametrização",
+}
+COLUNAS_PENDENCIAS = {
+    "material": "Material", "descricao_material": "Descrição",
+    "posicao": "Destino PT02", "unidade_operacional": "UMB",
+    "necessidade_operacional": "Necessidade total",
+    "quantidade_planejada": "Qtd. planejada",
+    "quantidade_pendente": "Qtd. pendente", "motivo": "Motivo",
+}
 
+
+def _tabela_exportacao(df: pd.DataFrame, colunas: dict) -> pd.DataFrame:
+    """Preserva números e identificadores, inclusive em tabelas vazias."""
+    return df.reindex(columns=list(colunas)).rename(columns=colunas).copy()
+
+
+def gerar_excel_ressuprimento(
+    criticos: pd.DataFrame, retiradas: pd.DataFrame,
+    pendencias: pd.DataFrame, conflitos: pd.DataFrame, indicadores: dict,
+) -> bytes:
+    """Gera a lista integral em memória, sem gravar dados operacionais."""
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
+
+    memoria = BytesIO()
+    tabelas = {
+        "Retiradas por origem": _tabela_exportacao(retiradas, COLUNAS_RETIRADAS),
+        "Criticos": _tabela_exportacao(criticos, {
+            **COLUNAS_FILA, "media_mensal_saida": "Média mensal analítica",
+        }),
+        "Pendencias": _tabela_exportacao(pendencias, COLUNAS_PENDENCIAS),
+        "Conflitos PT02": _tabela_exportacao(conflitos, {
+            "material": "Material", "descricao_material": "Descrição",
+            "posicao": "Posição PT02", "id_posicao_material": "ID da posição",
+            "data_modificacao": "Modificação BINMAT",
+        }),
+        "Criterios": pd.DataFrame([
+            ("Geração", datetime.now().strftime("%d/%m/%Y %H:%M:%S")),
+            ("Janela da demanda", str(indicadores["data_inicio_demanda"])
+             + " a " + str(indicadores["data_referencia_demanda"])),
+            ("Criticidade", "Saldo PT02 F5 < 50% da média mensal analítica; média > 0"),
+            ("Quantidade", "Completar 100% da média, com arredondamento operacional existente e limite T001"),
+            ("Origem", "Somente F5 atual em T001; unidades compatíveis; B5 não abastece"),
+            ("Agrupamento", "Mais SKUs críticos por posição; empate pelo saldo do material e endereço"),
+            ("Execução", "Somar apenas Qtd. retirar nesta origem por material; saldos de destino repetem em múltiplas origens"),
+            ("Limitações", "Snapshot sem reserva; conferir saldo físico e capacidade PT02 antes da execução"),
+            ("Pallets", "Posição não identifica necessariamente um único pallet"),
+            ("MIN/MAX", "Diagnóstico preservado: não é limite da sugestão atual"),
+            ("Conflitos", "Materiais com duplicidade PT02 não recebem retiradas"),
+        ], columns=["Critério", "Definição"]),
+    }
+    with pd.ExcelWriter(memoria, engine="openpyxl") as writer:
+        for nome, tabela in tabelas.items():
+            tabela.to_excel(writer, sheet_name=nome, index=False)
+            ws = writer.sheets[nome]
+            ws.freeze_panes = "A2"
+            ws.auto_filter.ref = ws.dimensions
+            ws.sheet_view.showGridLines = False
+            for cell in ws[1]:
+                cell.font = Font(bold=True, color="FFFFFF")
+                cell.fill = PatternFill("solid", fgColor="1F4E78")
+                cell.alignment = Alignment(wrap_text=True, vertical="center")
+            ws.row_dimensions[1].height = 32
+            for row in ws.iter_rows(min_row=2):
+                for cell in row:
+                    if isinstance(cell.value, str):
+                        # Identificadores/descritivos são texto literal, mesmo
+                        # quando começam por '=': nunca são fórmulas do Excel.
+                        cell.data_type = "s"
+                    elif isinstance(cell.value, (int, float)):
+                        cell.number_format = "#,##0.00"
+                    cell.alignment = Alignment(vertical="top")
+            for idx, titulo in enumerate(tabela.columns, 1):
+                valores = tabela.iloc[:, idx - 1].fillna("").astype(str)
+                largura = max(len(str(titulo)), max(map(len, valores), default=0)) + 2
+                ws.column_dimensions[get_column_letter(idx)].width = min(max(largura, 12), 55)
+            if nome == "Criterios":
+                ws.column_dimensions["B"].width = 95
+                for row in ws.iter_rows(min_row=2):
+                    row[1].alignment = Alignment(wrap_text=True, vertical="top")
+                    ws.row_dimensions[row[0].row].height = 42
+            ws.print_title_rows = "1:1"
+            ws.page_setup.orientation = "landscape"
+            ws.page_setup.paperSize = ws.PAPERSIZE_A4
+            ws.page_setup.fitToWidth = 1
+            ws.page_setup.fitToHeight = 0
+            ws.sheet_properties.pageSetUpPr.fitToPage = True
+            ws.print_options.horizontalCentered = True
+    return memoria.getvalue()
+
+
+def render_ressuprimento_pt02(conn: sqlite3.Connection, *, usuario: dict) -> None:
+    """Exibe os críticos e as retiradas agrupadas sem limite de registros."""
     st.title("Radar preventivo — Ressuprimento PT02")
-    st.caption(
-        f"Usuário: {usuario['nome']} — {usuario['matricula']}"
-    )
-
-    # Não aplicamos cache nesta primeira versão: cada reconstrução da página
-    # lê o banco atual, coerente com a natureza viva do estoque após os ETLs.
-    radar, indicadores = calcular_radar_ressuprimento_pt02(
-        conn,
-        meses=6,
-    )
-
-    # A inconsistência de destino PT02 aparece antes da fila de ações.
-    # Esses materiais permanecem no radar para auditoria, mas não entram
-    # nas métricas operacionais nem em transferências sugeridas.
-    duplicidades = radar.loc[radar["duplicidade_pt02"]].copy()
-    radar_regular = radar.loc[~radar["duplicidade_pt02"]].copy()
-    total_materiais_duplicados = indicadores[
-        "qtd_materiais_duplicados_pt02"
-    ]
-    if total_materiais_duplicados:
-        materiais = ", ".join(
-            str(material)
-            for material in indicadores["materiais_duplicados_pt02"]
-        )
-        st.header("🚨 CONFLITO DE POSIÇÕES PT02 — AÇÃO BLOQUEADA")
-        st.error(
-            f"{total_materiais_duplicados} material(is) aparecem em mais de "
-            "uma posição PT02 definitiva na BINMAT. "
-            f"Materiais: {materiais}. Não há transferência sugerida "
-            "para eles. Confira abaixo todas as posições e regularize "
-            "a origem dos dados; os demais materiais continuam na fila."
-        )
-        st.dataframe(
-            duplicidades[
-                [
-                    "material",
-                    "descricao_material",
-                    "posicao",
-                    "id_posicao_material",
-                    "data_modificacao",
-                ]
-            ].rename(
-                columns={
-                    "material": "Material",
-                    "descricao_material": "Descrição",
-                    "posicao": "Posição PT02",
-                    "id_posicao_material": "ID da posição",
-                    "data_modificacao": "Modificação BINMAT",
-                }
-            ),
-            width="stretch",
-            hide_index=True,
-        )
+    st.caption(f"Usuário: {usuario['nome']} — {usuario['matricula']}")
+    radar, indicadores = calcular_radar_ressuprimento_pt02(conn, meses=6)
+    conflitos = radar.loc[radar["duplicidade_pt02"]].copy()
+    if not conflitos.empty:
+        st.error("CONFLITO DE POSIÇÕES PT02 — AÇÃO BLOQUEADA. "
+                 "Os materiais abaixo não recebem sugestão de retirada.")
+        st.dataframe(_tabela_exportacao(conflitos, {
+            "material": "Material", "descricao_material": "Descrição",
+            "posicao": "Posição PT02", "id_posicao_material": "ID da posição",
+            "data_modificacao": "Modificação BINMAT",
+        }), width="stretch", hide_index=True)
     else:
-        # O indicador sempre visível também confirma que a versão corrigida
-        # da tela está em execução, mesmo quando não há conflitos no banco.
         st.info("Verificação BINMAT: 0 materiais com conflito PT02.")
 
-    contagem_status = indicadores["status_operacional"]
-    total_necessidade = int(
-        (radar_regular["necessidade_ressuprimento"] > 0).sum()
-    )
-    total_acoes = (
-        contagem_status.get("RESSUPRIR", 0)
-        + contagem_status.get("RESSUPRIR PARCIAL", 0)
-    )
-    total_riscos_pcp = (
-        contagem_status.get("SEM SALDO T001", 0)
-        + contagem_status.get("RESSUPRIR PARCIAL", 0)
-    )
-
+    criticos = preparar_criticos_ressuprimento(radar)
+    origens = carregar_saldo_t001_por_posicao(conn)
+    retiradas, pendencias = preparar_retiradas_t001(criticos, origens)
     st.caption(
         "Janela móvel da demanda: "
         f"{indicadores['data_inicio_demanda'].strftime('%d/%m/%Y')} a "
         f"{indicadores['data_referencia_demanda'].strftime('%d/%m/%Y')} | "
         f"PT02 analisadas: {indicadores['pt02_definitivas']}"
     )
+    st.caption("Crítico: saldo PT02 F5 abaixo de 50% da média mensal. "
+               "A sugestão completa 100% da média, limitada ao saldo T001. "
+               "Exatamente 50% fica fora. Lista integral, sem Top XX.")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Materiais críticos", len(criticos))
+    c2.metric("Com retirada planejada", retiradas["material"].nunique())
+    c3.metric("Com quantidade pendente", len(pendencias))
+    c4.metric("Posições T001 a visitar", retiradas["posicao_t001"].nunique())
+    st.caption("Um material com atendimento parcial aparece nas retiradas e nas pendências.")
 
-    coluna_total, coluna_completo, coluna_parcial, coluna_sem_saldo = (
-        st.columns(4)
+    st.download_button(
+        "Baixar lista completa em Excel (.xlsx)",
+        data=gerar_excel_ressuprimento(criticos, retiradas, pendencias, conflitos, indicadores),
+        file_name=f"ressuprimento_pt02_{datetime.now():%Y%m%d_%H%M%S}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key="excel_criticos_ressuprimento_pt02",
     )
-
-    coluna_total.metric(
-        "Ações possíveis",
-        total_acoes,
-    )
-    coluna_completo.metric(
-        "Ressuprir",
-        contagem_status.get("RESSUPRIR", 0),
-    )
-    coluna_parcial.metric(
-        "Ressuprir parcial",
-        contagem_status.get("RESSUPRIR PARCIAL", 0),
-    )
-    coluna_sem_saldo.metric(
-        "Encaminhados ao PCP",
-        total_riscos_pcp,
-    )
-
-    st.caption(
-        f"O radar identificou {total_necessidade} materiais com necessidade. "
-        f"Destes, {total_acoes} permitem ação do abastecedor e "
-        f"{total_riscos_pcp} possuem risco total ou residual para o PCP."
-    )
-
-    # Reserva um quinto da largura para a consulta por código.
     coluna_consulta, _ = st.columns([1, 4])
     with coluna_consulta:
-        codigo_material = st.text_input(
-            "Consultar código do material",
-            value="",
-            placeholder="Ex.: 1020283",
-            help=(
-                "Digite o código completo. A consulta usa todo o radar, "
-                "sem o limite Top XX e sem restringir aos itens da fila. "
-                "Limpe o campo para voltar à fila de prioridades."
-            ),
-            key="consulta_material_ressuprimento_pt02",
-        ).strip()
-
-    if codigo_material:
-        # Busca exata no radar completo: inclui conflitos e materiais que
-        # não permitem ação. Não altera indicadores nem a ordem da fila.
-        consulta = radar.loc[
-            radar["material"].astype(str).str.strip().eq(codigo_material)
-        ].copy()
-
-        st.subheader(f"Consulta do material — {codigo_material}")
+        codigo = st.text_input("Consultar código do material", value="",
+            placeholder="Ex.: 1020283", key="consulta_material_ressuprimento_pt02",
+            help="Busca exata em todo o radar. Limpe para voltar à lista completa de críticos.").strip()
+    if codigo:
+        consulta = radar.loc[radar["material"].astype(str).str.strip().eq(codigo)]
         if consulta.empty:
-            st.info(
-                f"O material {codigo_material} não foi encontrado no radar "
-                "PT02 atual. Isso não confirma sua ausência no cadastro; "
-                "confira se possui posição PT02 definitiva nos dados atuais."
-            )
+            st.info(f"Material {codigo} não encontrado no radar PT02 atual; "
+                    "isso não confirma ausência no cadastro.")
             return
-
-        # Conflitos exibem todas as posições, sem sugestão operacional.
         if consulta["duplicidade_pt02"].any():
-            st.error(
-                "CONFLITO DE POSIÇÕES PT02 — AÇÃO BLOQUEADA. "
-                "Regularize as posições na origem dos dados."
-            )
-            st.dataframe(
-                consulta[
-                    ["material", "descricao_material", "posicao",
-                     "id_posicao_material", "data_modificacao"]
-                ].rename(columns={
-                    "material": "Material",
-                    "descricao_material": "Descrição",
-                    "posicao": "Posição PT02",
-                    "id_posicao_material": "ID da posição",
-                    "data_modificacao": "Modificação BINMAT",
-                }),
-                width="stretch",
-                hide_index=True,
-            )
+            st.error("Consulta com conflito PT02: confira o quadro de posições acima.")
             return
-
-        for _, item_consulta in consulta.iterrows():
-            _mostrar_detalhe_material(item_consulta)
+        if not criticos["material"].astype(str).eq(codigo).any():
+            st.info("Material fora do corte crítico de 50%. Os valores abaixo são "
+                    "do radar geral; não geram retirada nesta lista.")
+        for _, item in consulta.iterrows():
+            _mostrar_detalhe_material(item)
+        retiradas_item = retiradas.loc[retiradas["material"].astype(str).eq(codigo)]
+        if not retiradas_item.empty:
+            st.subheader("Retiradas deste material")
+            st.dataframe(_tabela_exportacao(retiradas_item, COLUNAS_RETIRADAS),
+                         width="stretch", hide_index=True)
+        pendencias_item = pendencias.loc[pendencias["material"].astype(str).eq(codigo)]
+        if not pendencias_item.empty:
+            st.dataframe(_tabela_exportacao(pendencias_item, COLUNAS_PENDENCIAS),
+                         width="stretch", hide_index=True)
         return
 
-    st.subheader("Fila de prioridades")
-    st.caption(
-        "Esta fila contém somente ressuprimentos completos ou parciais que "
-        "podem ser executados. A ordem é definida pela demanda."
-    )
-
-    limite = st.slider(
-        "Quantidade de itens exibidos",
-        min_value=10,
-        max_value=100,
-        value=20,
-        step=10,
-        format="Top %d",
-        key="limite_fila_ressuprimento_pt02",
-    )
-
-    fila = preparar_fila_prioritaria(
-        radar_regular,
-        limite=limite,
-    )
-
-    if fila.empty:
-        st.success(
-            "Nenhuma posição PT02 regular está apta a ressuprimento."
-        )
+    st.subheader("Retiradas agrupadas por posição T001")
+    st.caption("Origens com mais SKUs críticos atendíveis aparecem primeiro. "
+               "Cada linha informa a quantidade a retirar naquela origem. "
+               "Conferir saldo físico e capacidade da PT02 antes da execução.")
+    if retiradas.empty:
+        st.info("Nenhuma retirada planejada para os critérios e origens atuais.")
+    else:
+        st.dataframe(_tabela_exportacao(retiradas, COLUNAS_RETIRADAS),
+                     width="stretch", hide_index=True)
+    st.subheader("Pendências de abastecimento")
+    if pendencias.empty:
+        st.info("Nenhuma quantidade pendente entre os materiais críticos.")
+    else:
+        st.dataframe(_tabela_exportacao(pendencias, COLUNAS_PENDENCIAS),
+                     width="stretch", hide_index=True)
+    st.subheader("Todos os materiais críticos")
+    if criticos.empty:
+        st.success("Nenhuma PT02 regular abaixo de 50% da média mensal.")
         return
-
-    fila_exibicao = (
-        fila[list(COLUNAS_FILA)]
-        .rename(columns=COLUNAS_FILA)
-    )
-
-    # A tabela recebe uma cópia textual para usar ponto nos milhares e
-    # vírgula nos decimais. ``fila`` permanece numérica e será usada tanto na
-    # seleção quanto no detalhe e em futuros comandos operacionais.
-    fila_exibicao["Média mensal"] = fila_exibicao.apply(
-        lambda linha: _formatar_numero_operacional_br(
-            linha["Média mensal"],
-            linha["UMB"],
-        ),
-        axis=1,
-    )
-
-    for coluna in [
-        "Saldo PT02 F5",
-        "Necessidade",
-        "Saldo T001 F5",
-        "Qtd. sugerida",
-    ]:
-        fila_exibicao[coluna] = fila_exibicao.apply(
-            lambda linha: _formatar_numero_operacional_br(
-                linha[coluna],
-                linha["UMB"],
-            ),
-            axis=1,
-        )
-
-    evento = st.dataframe(
-        fila_exibicao,
-        width="stretch",
-        hide_index=True,
-        selection_mode="single-row",
-        on_select="rerun",
-        key="fila_prioritaria_ressuprimento_pt02",
-    )
-
-    linhas_selecionadas = evento.selection.rows
-
-    if not linhas_selecionadas:
-        st.info(
-            "Selecione um material para compreender o cálculo e os alertas."
-        )
-        return
-
-    item = fila.iloc[linhas_selecionadas[0]]
-    _mostrar_detalhe_material(item)
+    evento = st.dataframe(_tabela_exportacao(criticos, COLUNAS_FILA),
+        width="stretch", hide_index=True, selection_mode="single-row",
+        on_select="rerun", key="criticos_ressuprimento_pt02_v2")
+    selecionadas = evento.selection.rows
+    if selecionadas and selecionadas[0] < len(criticos):
+        _mostrar_detalhe_material(criticos.iloc[selecionadas[0]])

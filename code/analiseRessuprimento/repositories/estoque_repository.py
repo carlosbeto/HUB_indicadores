@@ -14,11 +14,45 @@ DEPOSITO_RESSUPRIMENTO = "1002"
 TIPO_DEPOSITO_PICKING = "PT02"
 TIPO_DEPOSITO_ORIGEM = "T001"
 
+# Estoque em preparação ainda não está liberado para abastecer o picking.
+POSICAO_T001_EM_PROCESSO = "EMBALAR-ETIQUETAR"
+
 TIPO_ESTOQUE_LIVRE = "F5"
 TIPO_ESTOQUE_BLOQUEADO = "B5"
 
 FONTE_ESTOQUE = "VISAO_GERAL"
 FONTE_PARAMETRIZACAO = "BINMAT"
+
+
+def carregar_saldo_t001_por_posicao(conn: sqlite3.Connection) -> pd.DataFrame:
+    """Lê origens atuais por material, posição e unidade, somente F5.
+
+    EXISTS evita multiplicar saldos por registros de procedência. A ausência
+    na BINMAT não elimina uma origem observada no snapshot VISAO_GERAL.
+    """
+
+    return pd.read_sql_query(
+        """
+        SELECT p.material, p.posicao AS posicao_t001,
+               s.unidade_medida,
+               SUM(COALESCE(s.quantidade_disponivel, 0)) AS saldo_origem_f5
+        FROM dim_posicao_material AS p
+        INNER JOIN fact_saldo_posicao AS s ON s.id_posicao_material = p.id
+        WHERE p.deposito = ? AND p.tipo_deposito = ?
+          AND s.tipo_estoque = ?
+          AND UPPER(TRIM(COALESCE(p.posicao, ''))) <> ?
+          AND EXISTS (
+              SELECT 1 FROM posicao_material_fontes AS f
+              WHERE f.id_posicao_material = p.id
+                AND f.fonte = ? AND f.presente_atual = 1
+          )
+        GROUP BY p.material, p.posicao, s.unidade_medida
+        ORDER BY p.posicao, p.material, s.unidade_medida
+        """,
+        conn,
+        params=(DEPOSITO_RESSUPRIMENTO, TIPO_DEPOSITO_ORIGEM,
+                TIPO_ESTOQUE_LIVRE, POSICAO_T001_EM_PROCESSO, FONTE_ESTOQUE),
+    )
 
 
 # ============================================================
@@ -105,6 +139,8 @@ def carregar_saldo_t001_por_material(
     - informa quantas relações atuais também estão
       parametrizadas na BINMAT.
 
+    EMBALAR-ETIQUETAR não compõe o saldo disponível para ressuprimento.
+
     A ausência de parametrização BINMAT não elimina a T001
     da análise de estoque.
     """
@@ -158,6 +194,7 @@ def carregar_saldo_t001_por_material(
 
         WHERE p.deposito = ?
           AND p.tipo_deposito = ?
+          AND UPPER(TRIM(COALESCE(p.posicao, ''))) <> ?
 
         GROUP BY
             p.material
@@ -178,5 +215,6 @@ def carregar_saldo_t001_por_material(
             FONTE_PARAMETRIZACAO,
             DEPOSITO_RESSUPRIMENTO,
             TIPO_DEPOSITO_ORIGEM,
+            POSICAO_T001_EM_PROCESSO,
         ),
     )
